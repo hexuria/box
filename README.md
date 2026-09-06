@@ -9,7 +9,7 @@ License: **MIT**. MSRV: Rust **1.85**.
 ## What this repo is
 
 | Layer | Role | This repo? |
-| --- | --- |
+| --- | --- | --- |
 | L1 | Client / desktop UI | No — Windows and macOS are **clients**, not a native box OS |
 | L2 | Server / control plane: tool router + **EnsureBox** lifecycle | No — L2 *calls* this image |
 | **L3** | **Sandboxed Linux computer: `box-exec` + `box-host` + X desktop + Chrome + CUA** | **Yes** |
@@ -92,7 +92,7 @@ Native mode sets `BOX_DESKTOP=0`. CUA screenshot needs the container (or a local
 ## Ports
 
 | Port | Published? | Process | Notes |
-| --- | --- |
+| --- | --- | --- | --- |
 | **1337** | yes | `box-exec` | exec, files, CUA. Bind `BOX_EXEC_BIND`. |
 | **1340** | yes | `box-host` | health, ready, info, desktop, chrome. Bind `BOX_HOST_BIND`. |
 | **6080** | yes | websockify / noVNC | Viewer. `http://127.0.0.1:6080/vnc.html` |
@@ -102,7 +102,7 @@ Native mode sets `BOX_DESKTOP=0`. CUA screenshot needs the container (or a local
 ## Environment
 
 | Variable | Default (image) | Meaning |
-| --- | --- |
+| --- | --- | --- |
 | `BOX_TOKEN` | **required in Docker** | Bearer token for exec, CUA, and host `/v1/info` |
 | `BOX_HOST_TOKEN` | same as `BOX_TOKEN` | Optional split token for host info/desktop/chrome |
 | `BOX_ID` | hostname / `grok-box` | Reported by `/v1/info` |
@@ -156,7 +156,7 @@ crates/box-cua       screenshot / click / type / key / scroll against X11
 | Mount | Role |
 | --- | --- |
 | `/workspace` | Jail root for cwd and file APIs. Persist across hibernate. |
-| `/home/box/chrome-profile` | Chromium `--user-data-dir`. Persist cookies/session. |
+| `/home/box/chrome-profile` | Chromium `--user-data-dir`. Persist cookies/session. Must be writable by uid **1000**; otherwise the entrypoint falls back to `/tmp/box-chrome-profile`. |
 
 ## What this is not
 
