@@ -1,0 +1,162 @@
+"use server";
+
+import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
+import { BoxHttpError } from "./box-client";
+import {
+  click,
+  createBox,
+  destroyBox,
+  execCommand,
+  screenshot,
+  sendKey,
+  startBox,
+  stopBox,
+  typeText,
+  writeGuestFile,
+} from "./lifecycle";
+
+function isNextControlFlow(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    "digest" in err &&
+    typeof (err as { digest: unknown }).digest === "string" &&
+    ((err as { digest: string }).digest.startsWith("NEXT_REDIRECT") ||
+      (err as { digest: string }).digest.startsWith("NEXT_NOT_FOUND"))
+  );
+}
+
+function fail(err: unknown): { error: string } {
+  if (isNextControlFlow(err)) {
+    throw err;
+  }
+  if (err instanceof BoxHttpError) {
+    const body = err.body as { error?: { message?: string } };
+    return { error: body?.error?.message || err.message };
+  }
+  return { error: err instanceof Error ? err.message : String(err) };
+}
+
+export async function createBoxAction(
+  _prev: { error: string } | null,
+  formData: FormData,
+): Promise<{ error: string } | null> {
+  try {
+    const name = String(formData.get("name") || "").trim();
+    const box = await createBox(name || undefined);
+    revalidatePath("/");
+    redirect(`/boxes/${box.id}`);
+  } catch (err) {
+    return fail(err);
+  }
+}
+
+export async function stopBoxAction(id: string, hibernate = false) {
+  await stopBox(id, hibernate);
+  revalidatePath("/");
+  revalidatePath(`/boxes/${id}`);
+}
+
+export async function startBoxAction(id: string) {
+  await startBox(id);
+  revalidatePath("/");
+  revalidatePath(`/boxes/${id}`);
+}
+
+export async function destroyBoxAction(id: string) {
+  await destroyBox(id);
+  revalidatePath("/");
+  redirect("/");
+}
+
+export async function execAction(
+  id: string,
+  _prev: unknown,
+  formData: FormData,
+): Promise<{ error?: string; result?: unknown }> {
+  try {
+    const command = String(formData.get("command") || "").trim();
+    if (!command) {
+      return { error: "command is required" };
+    }
+    const result = await execCommand(id, command);
+    revalidatePath(`/boxes/${id}`);
+    return { result };
+  } catch (err) {
+    return fail(err);
+  }
+}
+
+export async function writeFileAction(
+  id: string,
+  _prev: unknown,
+  formData: FormData,
+): Promise<{ error?: string; result?: unknown }> {
+  try {
+    const path = String(formData.get("path") || "").trim();
+    const content = String(formData.get("content") || "");
+    if (!path) {
+      return { error: "path is required" };
+    }
+    const result = await writeGuestFile(id, path, content);
+    return { result };
+  } catch (err) {
+    return fail(err);
+  }
+}
+
+export async function screenshotAction(
+  id: string,
+): Promise<{ error?: string; png?: string; width?: number; height?: number }> {
+  try {
+    const result = (await screenshot(id)) as {
+      png_base64?: string;
+      width?: number;
+      height?: number;
+    };
+    if (!result.png_base64) {
+      return { error: "screenshot response missing png_base64" };
+    }
+    return { png: result.png_base64, width: result.width, height: result.height };
+  } catch (err) {
+    return fail(err);
+  }
+}
+
+export async function clickAction(
+  id: string,
+  x: number,
+  y: number,
+): Promise<{ error?: string; ok?: boolean }> {
+  try {
+    await click(id, x, y, 1);
+    return { ok: true };
+  } catch (err) {
+    return fail(err);
+  }
+}
+
+export async function typeAction(
+  id: string,
+  text: string,
+): Promise<{ error?: string; ok?: boolean }> {
+  try {
+    await typeText(id, text);
+    return { ok: true };
+  } catch (err) {
+    return fail(err);
+  }
+}
+
+export async function keyAction(
+  id: string,
+  key: string,
+): Promise<{ error?: string; ok?: boolean }> {
+  try {
+    await sendKey(id, key);
+    return { ok: true };
+  } catch (err) {
+    return fail(err);
+  }
+}
