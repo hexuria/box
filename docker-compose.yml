@@ -1,0 +1,23 @@
+services:
+  box:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: grok-box:local
+    environment:
+      BOX_TOKEN: ${BOX_TOKEN:-dev-box-token}
+      BOX_ID: ${BOX_ID:-local-dev}
+      RUST_LOG: ${RUST_LOG:-info}
+      WORKSPACE_ROOT: /workspace
+    ports:
+      - "1337:1337"
+      - "1340:1340"
+    volumes:
+      - ./workspace-data:/workspace
+      - ./chrome-profile:/home/box/chrome-profile
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:1337/v1/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
