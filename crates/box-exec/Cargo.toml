@@ -9,6 +9,7 @@ rust-version.workspace = true
 
 [dependencies]
 box-common = { workspace = true }
+box-cua = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

@@ -1,8 +1,9 @@
 //! HTTP exec daemon for grok-box (`box-exec`).
 //!
-//! Phase 1: command execution, workspace file I/O, health.
-//! Phase 2+: desktop / chrome / CUA endpoints will land here or in sibling crates.
+//! Shell, workspace files, and Computer Use (CUA) actuators against the
+//! box X display. Inference stays in L4.
 
+mod cua;
 mod exec;
 mod files;
 mod middleware;
@@ -13,6 +14,7 @@ use std::time::Duration;
 
 use axum::Router;
 use box_common::BoxConfig;
+use box_cua::CuaConfig;
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 use tower_http::limit::RequestBodyLimitLayer;
@@ -31,6 +33,7 @@ pub struct AppState {
     pub default_timeout: Duration,
     pub max_timeout: Duration,
     pub max_output_bytes: usize,
+    pub cua: CuaConfig,
 }
 
 impl AppState {
@@ -42,6 +45,7 @@ impl AppState {
             default_timeout: config.default_timeout,
             max_timeout: config.max_timeout,
             max_output_bytes: config.max_output_bytes,
+            cua: CuaConfig::from_env(),
         }
     }
 }

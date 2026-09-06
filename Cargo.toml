@@ -20,7 +20,11 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 box-common = { path = "crates/box-common" }
+box-desktop = { path = "crates/box-desktop" }
+box-chrome = { path = "crates/box-chrome" }
+box-cua = { path = "crates/box-cua" }
 axum = { version = "0.8", features = ["json", "macros"] }
+base64 = "0.22"
 tokio = { version = "1.43", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

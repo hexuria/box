@@ -4,8 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Phase 2 stub: Chromium with a persistent box-local profile"
+description = "Chromium on the box display with a persistent profile"
 rust-version.workspace = true
 publish = false
 
 [dependencies]
+serde = { workspace = true }

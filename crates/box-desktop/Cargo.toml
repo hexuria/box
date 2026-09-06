@@ -4,8 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Phase 2 stub: Xvfb + x11vnc + noVNC desktop for grok-box"
+description = "Virtual desktop: Xvfb display probe and noVNC viewer config"
 rust-version.workspace = true
 publish = false
 
 [dependencies]
+serde = { workspace = true }

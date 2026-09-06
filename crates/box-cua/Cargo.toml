@@ -4,8 +4,16 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Phase 2 stub: Computer Use (screenshot / click / type) against the box display"
+description = "Computer Use actuators against the box X display"
 rust-version.workspace = true
 publish = false
 
 [dependencies]
+box-desktop = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+base64 = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
