@@ -42,6 +42,8 @@ sg docker -c 'npm run dev'
 
 Published guest ports are bound to `127.0.0.1`. Raw VNC (5900) and CDP (9222) stay inside the guest.
 
+The Layer 1 client lives in [`../l1`](../l1). It is a separate Next.js app on port **43141** that calls only this HTTP API.
+
 ## HTTP API (programmatic L1 / L2)
 
 Base: `http://127.0.0.1:43142`
@@ -66,7 +68,7 @@ Auth: `Authorization: Bearer <ENSUREBOX_TOKEN>` except `GET /api/v1/health`.
 | POST | `/api/v1/boxes/:id/cua/key` `{key}` |
 | POST | `/api/v1/boxes/:id/cua/scroll` `{x,y,dx,dy}` |
 
-The dashboard never sends the guest `BOX_TOKEN` to the browser. Responses omit it. VNC password shown in the UI is the first 8 characters of that token.
+The dashboard never sends the guest `BOX_TOKEN` to the browser. Responses omit it. VNC password shown in the UI is the first 8 characters of that token. L1 uses the same public payload.
 
 ## Smoke
 

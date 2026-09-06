@@ -10,17 +10,17 @@ License: **MIT**. MSRV: Rust **1.85**.
 
 | Layer | Role | This repo? |
 | --- | --- | --- |
-| L1 | Client / desktop UI | No — Windows and macOS are **clients**, not a native box OS |
+| L1 | Client / desktop UI | **Reference app in [`l1/`](l1/)** — talks only to EnsureBox; not in the guest image |
 | L2 | Server / control plane: tool router + **EnsureBox** lifecycle | **Reference app in [`ensurebox/`](ensurebox/)** — not in the guest image |
 | **L3** | **Sandboxed Linux computer: `box-exec` + `box-host` + X desktop + Chrome + CUA** | **Yes (this image)** |
 | L4 | open-ai-gateway (model inference) | No |
 
 ```
- L1 client  (Win / Mac / Linux UI)
-    │
+ L1 client  (./l1 — Win / Mac / Linux UI)
+    │  Bearer ENSUREBOX_TOKEN only
     ▼
- L2 tool router ── EnsureBox (create / stop / hibernate volumes)
-    │  Bearer BOX_TOKEN
+ L2 tool router ── EnsureBox (./ensurebox)
+    │  Bearer BOX_TOKEN (never sent to L1)
     ▼
  L3 grok-box (this repo, Linux image)
     ├── box-host :1340   identity, capabilities, ready, desktop/chrome status
@@ -44,6 +44,13 @@ docker compose up --build
 ```
 
 That single command starts exec, host, the virtual desktop, Chromium, and CUA tools.
+
+To use the Layer 1 client against EnsureBox instead of curling the guest:
+
+```bash
+cd ensurebox && npm install && npm run dev   # http://127.0.0.1:43142
+cd l1 && npm install && npm run dev          # http://127.0.0.1:43141
+```
 
 Health (no token):
 
@@ -137,6 +144,8 @@ Send `Authorization: Bearer <token>`. Health and ready stay unauthenticated so L
    - computer use → `POST /v1/cua/screenshot|click|type|key|scroll`
 5. Humans (or L1) can attach to noVNC on 6080 with the VNC password.
 6. Send **inference** to L4 (open-ai-gateway). Do not point the model at `box-host`.
+
+See [l1/README.md](l1/README.md) for the Layer 1 client (talks only to EnsureBox).
 
 See [ensurebox/README.md](ensurebox/README.md) for the Layer 2 control plane (create guest, wait ready, route tools).
 
