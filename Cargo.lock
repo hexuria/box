@@ -82,6 +82,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "base64"
+version = "0.22.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
 name = "bitflags"
 version = "2.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -90,6 +96,9 @@ checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 [[package]]
 name = "box-chrome"
 version = "0.1.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "box-common"
@@ -108,10 +117,20 @@ dependencies = [
 [[package]]
 name = "box-cua"
 version = "0.1.0"
+dependencies = [
+ "base64",
+ "box-desktop",
+ "serde",
+ "thiserror",
+ "tokio",
+]
 
 [[package]]
 name = "box-desktop"
 version = "0.1.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "box-exec"
@@ -119,6 +138,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "box-common",
+ "box-cua",
  "http",
  "http-body-util",
  "libc",
@@ -137,7 +157,10 @@ name = "box-host"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "box-chrome",
  "box-common",
+ "box-cua",
+ "box-desktop",
  "http",
  "http-body-util",
  "serde",
@@ -299,7 +322,7 @@ dependencies = [
 name = "hyper-util"
 version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96547c2556ec9d12fb1578c4eaf448b04993e7fb79cbaad930a656880a6bdfa0"
+checksum = "96547c2556ec9d12fb1578c4eaf448b04993e7fb79cbaad93095799d6b3beafa0"
 dependencies = [
  "bytes",
  "http",
