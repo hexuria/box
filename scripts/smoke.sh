@@ -37,6 +37,7 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 mkdir -p workspace-data chrome-profile
+chmod u+rwx workspace-data chrome-profile 2>/dev/null || true
 
 echo "==> building and starting grok-box"
 "${COMPOSE[@]}" up --build -d

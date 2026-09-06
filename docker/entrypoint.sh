@@ -138,26 +138,39 @@ start_chrome() {
   fi
 
   mkdir -p "${BOX_CHROME_PROFILE}"
+  if [[ ! -w "${BOX_CHROME_PROFILE}" ]]; then
+    echo "chrome profile ${BOX_CHROME_PROFILE} is not writable; using /tmp/box-chrome-profile" >&2
+    export BOX_CHROME_PROFILE="/tmp/box-chrome-profile"
+    mkdir -p "${BOX_CHROME_PROFILE}"
+  fi
   read -r w h < <(geom_wh)
   export DISPLAY="${BOX_DISPLAY}"
 
   echo "starting ${bin} on ${DISPLAY} profile=${BOX_CHROME_PROFILE} cdp=127.0.0.1:${BOX_CDP_PORT}"
-  # Closing the browser must not take the box down — do not record this pid.
-  "${bin}" \
-    --user-data-dir="${BOX_CHROME_PROFILE}" \
-    --no-first-run \
-    --no-default-browser-check \
-    --disable-dev-shm-usage \
-    --disable-gpu \
-    --disable-software-rasterizer \
-    --no-sandbox \
-    --window-size="${w},${h}" \
-    --window-position=0,0 \
-    --remote-debugging-address=127.0.0.1 \
-    --remote-debugging-port="${BOX_CDP_PORT}" \
-    about:blank \
-    >/tmp/box-chrome.log 2>&1 &
-  echo $! > /tmp/box-chrome.pid
+  # Closing/crashing the browser must not take the box down — restart it.
+  (
+    while true; do
+      "${bin}" \
+        --user-data-dir="${BOX_CHROME_PROFILE}" \
+        --no-first-run \
+        --no-default-browser-check \
+        --disable-dev-shm-usage \
+        --disable-gpu \
+        --disable-software-rasterizer \
+        --no-sandbox \
+        --disable-setuid-sandbox \
+        --window-size="${w},${h}" \
+        --window-position=0,0 \
+        --remote-debugging-address=127.0.0.1 \
+        --remote-debugging-port="${BOX_CDP_PORT}" \
+        about:blank \
+        >/tmp/box-chrome.log 2>&1 &
+      echo $! > /tmp/box-chrome.pid
+      wait $! || true
+      echo "chromium exited; restarting in 2s" >&2
+      sleep 2
+    done
+  ) &
 }
 
 echo "grok-box starting box_id=${BOX_ID:-grok-box} workspace=${WORKSPACE_ROOT} desktop=${BOX_DESKTOP} chrome=${BOX_CHROME} cua=${BOX_CUA}"

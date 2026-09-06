@@ -32,7 +32,8 @@ RUN apt-get update \
         chromium \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 1000 --shell /bin/bash box \
-    && mkdir -p /workspace /home/box/chrome-profile /home/box/.vnc \
+    && mkdir -p /workspace /home/box/chrome-profile /home/box/.vnc /tmp/.X11-unix \
+    && chmod 1777 /tmp/.X11-unix \
     && chown -R box:box /workspace /home/box
 
 COPY --from=builder /src/target/release/box-exec /usr/local/bin/box-exec
