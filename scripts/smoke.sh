@@ -16,6 +16,8 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 1
 fi
 
+export COMPOSE_BAKE="${COMPOSE_BAKE:-false}"
+
 COMPOSE=(docker compose)
 if ! docker compose version >/dev/null 2>&1; then
   if command -v docker-compose >/dev/null 2>&1; then
