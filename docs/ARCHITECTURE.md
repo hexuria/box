@@ -5,31 +5,32 @@ Working names: **grok-box**, **askit-box**. Role: **Grok Bot Layer 3** — the s
 ## One-pager (L1–L4)
 
 ```
-┌─────────────────────────────────────────────────────────────┐
+┌──────────────────────────────────────────────────────────────┐
 │ L1  Client / desktop                                        │
 │     Human UI (Win / Mac / Linux). Talks to L2.              │
 │     Never SSHes into the box.                               │
-└────────────────────────────┬────────────────────────────────┘
+└──────────────────────────────────────────────────────────────┘
                              │
-┌────────────────────────────▼────────────────────────────────┐
+┌──────────────────────────────────────────────────────────────┐
 │ L2  Server / control plane                                  │
 │     Tool router. Owns EnsureBox lifecycle.                  │
+│     Reference app: ./ensurebox (not in the guest image).    │
 │     Holds BOX_TOKEN. Does not execute agent shell itself.   │
-└────────────────────────────┬────────────────────────────────┘
+└──────────────────────────────────────────────────────────────┘
                              │ HTTP + Bearer
-┌────────────────────────────▼────────────────────────────────┐
+┌──────────────────────────────────────────────────────────────┐
 │ L3  grok-box  ← THIS REPOSITORY                             │
 │     box-host :1340   info / health / ready / desktop/chrome │
 │     box-exec :1337   exec, files, /v1/cua/*                 │
 │     jail: /workspace   user: box                            │
 │     Xvfb :1 1280×800, openbox, x11vnc, noVNC :6080          │
 │     Chromium + profile volume; CDP 127.0.0.1 only           │
-└────────────────────────────┬────────────────────────────────┘
+└──────────────────────────────────────────────────────────────┘
                              │ inference only (not this repo)
-┌────────────────────────────▼────────────────────────────────┐
+┌──────────────────────────────────────────────────────────────┐
 │ L4  open-ai-gateway (OAG)                                   │
 │     Model calls. No workspace, no X11, no shell.            │
-└─────────────────────────────────────────────────────────────┘
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ## Glossary
@@ -46,7 +47,7 @@ Working names: **grok-box**, **askit-box**. Role: **Grok Bot Layer 3** — the s
 ## Ports
 
 | Port | Process | Routes / role |
-| --- | --- |
+| --- | --- | --- |
 | **1337** | `box-exec` | `GET /v1/health`, `POST /v1/exec`, `GET\|PUT /v1/files`, `POST /v1/cua/*` |
 | **1340** | `box-host` | `GET /v1/health`, `GET /v1/ready`, `GET /v1/info`, `GET /v1/desktop`, `GET /v1/chrome` |
 | **6080** | websockify + noVNC | Viewer HTML at `/vnc.html`. Published by Compose. |
@@ -132,18 +133,18 @@ Windows and macOS remain **clients** and/or **Docker hosts** for this Linux box;
 
 The image is a **guest**. L2 decides when a box exists.
 
-Suggested operations (names are illustrative):
+A reference control plane lives in [`ensurebox/`](../ensurebox/README.md). It is a Next.js app with an operator UI and `/api/v1/boxes*` routes. It is **not** baked into the grok-box image (see `.dockerignore`).
 
 | Operation | L2 action | Volume |
-| --- | --- |
-| **create** | `docker run` / kube Pod from `grok-box`, inject `BOX_ID` + `BOX_TOKEN`, attach network | New or reused `/workspace` + chrome-profile volumes |
-| **wait ready** | Poll `GET :1340/v1/ready` until 200 | — |
-| **use** | Tool router → `:1337` with the token; optional viewer `:6080` | Writes persist on the volumes |
-| **stop** | `docker stop` / delete Pod; keep volumes | Workspace + profile retained |
-| **hibernate** | Stop compute, keep `/workspace` and `/home/box/chrome-profile` | Resume = create + same volumes + same or new token |
-| **destroy** | Delete container **and** volumes | Gone |
+| --- | --- | --- |
+| **create** | `docker run` from `GROK_BOX_IMAGE`, inject `BOX_ID` + `BOX_TOKEN` via env file, publish unique host ports on 127.0.0.1 | New `/workspace` + chrome-profile under `ensurebox/data/volumes/<id>/` |
+| **wait ready** | Poll guest `GET :1340/v1/ready` until 200 | — |
+| **use** | Tool router → guest `:1337` with the stored token; viewer `:6080` | Writes persist on the volumes |
+| **stop** | `docker stop`; keep container | Workspace + profile retained |
+| **hibernate** | Stop compute, keep volumes | Resume = `docker start` + wait ready |
+| **destroy** | `docker rm -f` **and** delete volumes | Gone |
 
-Hibernation is a volume policy, not a feature of `box-exec`. Do not put EnsureBox in this repository.
+Hibernation is a volume policy, not a feature of `box-exec`.
 
 Recommended env on create:
 

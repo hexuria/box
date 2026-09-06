@@ -11,8 +11,8 @@ License: **MIT**. MSRV: Rust **1.85**.
 | Layer | Role | This repo? |
 | --- | --- | --- |
 | L1 | Client / desktop UI | No — Windows and macOS are **clients**, not a native box OS |
-| L2 | Server / control plane: tool router + **EnsureBox** lifecycle | No — L2 *calls* this image |
-| **L3** | **Sandboxed Linux computer: `box-exec` + `box-host` + X desktop + Chrome + CUA** | **Yes** |
+| L2 | Server / control plane: tool router + **EnsureBox** lifecycle | **Reference app in [`ensurebox/`](ensurebox/)** — not in the guest image |
+| **L3** | **Sandboxed Linux computer: `box-exec` + `box-host` + X desktop + Chrome + CUA** | **Yes (this image)** |
 | L4 | open-ai-gateway (model inference) | No |
 
 ```
@@ -137,6 +137,8 @@ Send `Authorization: Bearer <token>`. Health and ready stay unauthenticated so L
    - computer use → `POST /v1/cua/screenshot|click|type|key|scroll`
 5. Humans (or L1) can attach to noVNC on 6080 with the VNC password.
 6. Send **inference** to L4 (open-ai-gateway). Do not point the model at `box-host`.
+
+See [ensurebox/README.md](ensurebox/README.md) for the Layer 2 control plane (create guest, wait ready, route tools).
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/API.md](docs/API.md), and [docs/openapi.yaml](docs/openapi.yaml).
 

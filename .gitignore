@@ -7,6 +7,10 @@
 .env
 .env.*
 !/.env.example
+!/ensurebox/.env.example
 /workspace-data/
 /chrome-profile/
 /tmp-scaffold/
+/ensurebox/node_modules/
+/ensurebox/.next/
+/ensurebox/data/
