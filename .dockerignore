@@ -1,0 +1,10 @@
+/target
+/.git
+/workspace-data
+/chrome-profile
+**/*.md
+!README.md
+.env
+.env.*
+!/.env.example
+/tmp-scaffold
