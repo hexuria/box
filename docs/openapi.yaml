@@ -1,10 +1,11 @@
 openapi: 3.1.0
 info:
-  title: grok-box Phase 1
+  title: grok-box
   description: |
     Layer 3 sandboxed agent computer. Two processes share this document:
-    box-exec (port 1337) and box-host (port 1340). Neither service performs
-    model inference.
+    box-exec (port 1337: exec, files, CUA) and box-host (port 1340: identity,
+    readiness, desktop/chrome status). Neither service performs model inference.
+    CUA coordinate space is the X framebuffer 1280x800.
   version: 0.1.0
   license:
     name: MIT
@@ -19,8 +20,12 @@ servers:
 tags:
   - name: exec
     description: box-exec — commands and workspace files
+  - name: cua
+    description: box-exec — Computer Use against DISPLAY=:1 (1280x800)
   - name: host
     description: box-host — identity and readiness
+  - name: desktop
+    description: box-host — virtual desktop and Chromium status
 
 components:
   securitySchemes:
@@ -114,11 +119,75 @@ components:
         bytes_written: { type: integer }
     Ready:
       type: object
-      required: [status, service, exec_ready]
+      required: [status, service, exec_ready, desktop_ready]
       properties:
         status: { type: string }
         service: { type: string }
         exec_ready: { type: boolean }
+        desktop_ready: { type: boolean }
+    DesktopStatus:
+      type: object
+      required: [available, display, geometry, vnc, viewer]
+      properties:
+        available: { type: boolean }
+        display: { type: string }
+        geometry: { type: string }
+        vnc: { type: string }
+        viewer:
+          type: object
+          properties:
+            port: { type: integer }
+            path: { type: string }
+            url: { type: string }
+    ChromeStatus:
+      type: object
+      required: [enabled, running, profile, display]
+      properties:
+        enabled: { type: boolean }
+        running: { type: boolean }
+        profile: { type: string }
+        cdp: { type: string, nullable: true }
+        display: { type: string }
+    Screenshot:
+      type: object
+      required: [encoding, mime, width, height, png_base64, bytes]
+      properties:
+        encoding: { type: string, examples: [base64] }
+        mime: { type: string, examples: [image/png] }
+        width: { type: integer, examples: [1280] }
+        height: { type: integer, examples: [800] }
+        bytes: { type: integer }
+        png_base64: { type: string }
+    ClickRequest:
+      type: object
+      required: [x, y]
+      properties:
+        x: { type: integer, minimum: 0, maximum: 1279 }
+        y: { type: integer, minimum: 0, maximum: 799 }
+        button: { type: integer, minimum: 1, maximum: 7, default: 1 }
+    TypeRequest:
+      type: object
+      required: [text]
+      properties:
+        text: { type: string, minLength: 1 }
+    KeyRequest:
+      type: object
+      required: [key]
+      properties:
+        key: { type: string, minLength: 1 }
+    ScrollRequest:
+      type: object
+      required: [x, y, dx, dy]
+      properties:
+        x: { type: integer }
+        y: { type: integer }
+        dx: { type: integer }
+        dy: { type: integer }
+    CuaOk:
+      type: object
+      required: [ok]
+      properties:
+        ok: { type: boolean }
     Info:
       type: object
       required: [box_id, service, protocol, version, capabilities, endpoints, workspace]
@@ -164,7 +233,7 @@ paths:
     get:
       tags: [host]
       summary: Readiness (box-host only)
-      description: 200 when box-exec /v1/health succeeds.
+      description: 200 when box-exec /v1/health succeeds and the X display is up when BOX_DESKTOP_REQUIRED=1.
       security: []
       responses:
         "200":
@@ -283,6 +352,170 @@ paths:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
         "413":
           description: Payload too large
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /v1/desktop:
+    get:
+      tags: [desktop, host]
+      summary: Virtual desktop status (box-host)
+      security: [{ bearer: [] }]
+      responses:
+        "200":
+          description: Display probe and noVNC viewer URL
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DesktopStatus" }
+        "401":
+          description: Missing or wrong token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /v1/chrome:
+    get:
+      tags: [desktop, host]
+      summary: Chromium status (box-host)
+      security: [{ bearer: [] }]
+      responses:
+        "200":
+          description: Profile path, CDP bind, running flag
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ChromeStatus" }
+        "401":
+          description: Missing or wrong token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /v1/cua/screenshot:
+    post:
+      tags: [cua]
+      summary: Capture the 1280x800 X framebuffer as PNG (base64 JSON)
+      security: [{ bearer: [] }]
+      responses:
+        "200":
+          description: PNG screenshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Screenshot" }
+        "401":
+          description: Missing or wrong token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "503":
+          description: CUA disabled or display down
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /v1/cua/click:
+    post:
+      tags: [cua]
+      summary: Click at framebuffer coordinates
+      security: [{ bearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ClickRequest" }
+      responses:
+        "200":
+          description: Clicked
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CuaOk" }
+        "400":
+          description: Out of range or invalid button
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401":
+          description: Missing or wrong token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /v1/cua/type:
+    post:
+      tags: [cua]
+      summary: Type text into the focused window
+      security: [{ bearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TypeRequest" }
+      responses:
+        "200":
+          description: Typed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CuaOk" }
+        "400":
+          description: Empty or oversized text
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401":
+          description: Missing or wrong token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /v1/cua/key:
+    post:
+      tags: [cua]
+      summary: Press an xdotool keysym
+      security: [{ bearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/KeyRequest" }
+      responses:
+        "200":
+          description: Key sent
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CuaOk" }
+        "400":
+          description: Invalid key
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401":
+          description: Missing or wrong token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /v1/cua/scroll:
+    post:
+      tags: [cua]
+      summary: Scroll at framebuffer coordinates
+      security: [{ bearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ScrollRequest" }
+      responses:
+        "200":
+          description: Scrolled
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CuaOk" }
+        "400":
+          description: Out of range or dx=dy=0
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401":
+          description: Missing or wrong token
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
