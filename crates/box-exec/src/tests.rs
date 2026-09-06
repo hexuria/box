@@ -3,6 +3,7 @@ use std::time::Duration;
 use crate::{app, AppState};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use box_cua::CuaConfig;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -16,6 +17,7 @@ fn state(dir: &TempDir) -> AppState {
         default_timeout: Duration::from_secs(5),
         max_timeout: Duration::from_secs(10),
         max_output_bytes: 64 * 1024,
+        cua: CuaConfig::disabled(),
     }
 }
 
@@ -177,4 +179,72 @@ async fn files_put_rejects_absolute_escape() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"]["code"], "path_escape");
+}
+
+#[tokio::test]
+async fn cua_rejects_missing_auth() {
+    let dir = TempDir::new().unwrap();
+    let (status, body) = send(
+        state(&dir),
+        Request::builder()
+            .method("POST")
+            .uri("/v1/cua/screenshot")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"]["code"], "unauthorized");
+}
+
+#[tokio::test]
+async fn cua_screenshot_disabled() {
+    let dir = TempDir::new().unwrap();
+    let (status, body) = send(
+        state(&dir),
+        Request::builder()
+            .method("POST")
+            .uri("/v1/cua/screenshot")
+            .header("authorization", "Bearer secret-token")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"]["code"], "cua_disabled");
+}
+
+#[tokio::test]
+async fn cua_click_disabled() {
+    let dir = TempDir::new().unwrap();
+    let (status, body) = send(
+        state(&dir),
+        auth_json(
+            "POST",
+            "/v1/cua/click",
+            "secret-token",
+            json!({"x": 10, "y": 10}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"]["code"], "cua_disabled");
+}
+
+#[tokio::test]
+async fn cua_type_key_scroll_disabled() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir);
+    for (uri, payload) in [
+        ("/v1/cua/type", json!({"text": "hi"})),
+        ("/v1/cua/key", json!({"key": "Return"})),
+        (
+            "/v1/cua/scroll",
+            json!({"x": 10, "y": 10, "dx": 0, "dy": 1}),
+        ),
+    ] {
+        let (status, body) = send(s.clone(), auth_json("POST", uri, "secret-token", payload)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{uri}");
+        assert_eq!(body["error"]["code"], "cua_disabled", "{uri}");
+    }
 }

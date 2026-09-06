@@ -1,7 +1,8 @@
 //! Thin host gateway for grok-box (`box-host`).
 //!
 //! This process does **not** run inference. It advertises box identity,
-//! Phase 1/2+ capabilities, and readiness of `box-exec`.
+//! capabilities (exec, files, desktop, chrome, cua), and readiness of
+//! `box-exec` (and the X display when desktop is required).
 
 use std::time::Duration;
 
@@ -10,7 +11,10 @@ use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::routing::get;
 use axum::{Json, Router};
+use box_chrome::{probe_chrome, ChromeConfig, ChromeStatus};
 use box_common::{bearer_token, tokens_equal, ApiError, BoxConfig, PROTOCOL_VERSION};
+use box_cua::CuaConfig;
+use box_desktop::{DesktopConfig, DesktopStatus};
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -24,6 +28,9 @@ pub struct AppState {
     pub workspace: String,
     pub exec_url: String,
     pub host_bind: String,
+    pub desktop: DesktopConfig,
+    pub chrome: ChromeConfig,
+    pub cua: CuaConfig,
 }
 
 impl AppState {
@@ -34,6 +41,9 @@ impl AppState {
             workspace: config.workspace.display().to_string(),
             exec_url: config.exec_url.trim_end_matches('/').to_string(),
             host_bind: config.host_bind.to_string(),
+            desktop: DesktopConfig::from_env(),
+            chrome: ChromeConfig::from_env(),
+            cua: CuaConfig::from_env(),
         }
     }
 }
@@ -50,6 +60,7 @@ struct ReadyResponse {
     status: &'static str,
     service: &'static str,
     exec_ready: bool,
+    desktop_ready: bool,
 }
 
 #[derive(Serialize)]
@@ -88,6 +99,8 @@ struct Endpoints {
 pub fn app(state: AppState) -> Router {
     let protected = Router::new()
         .route("/v1/info", get(info))
+        .route("/v1/desktop", get(desktop))
+        .route("/v1/chrome", get(chrome))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
 
     Router::new()
@@ -124,19 +137,27 @@ async fn health() -> Json<HealthResponse> {
 
 async fn ready(State(state): State<AppState>) -> Result<Json<ReadyResponse>, ApiError> {
     let exec_ready = probe_exec_health(&state.exec_url).await;
-    if exec_ready {
-        Ok(Json(ReadyResponse {
-            status: "ready",
-            service: "box-host",
-            exec_ready: true,
-        }))
-    } else {
-        Err(ApiError::new(
+    let desktop_ready = state.desktop.probe_display();
+    if !exec_ready {
+        return Err(ApiError::new(
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             "not_ready",
             "box-exec is not reachable",
-        ))
+        ));
     }
+    if state.desktop.required && !desktop_ready {
+        return Err(ApiError::new(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "not_ready",
+            "desktop display is not up",
+        ));
+    }
+    Ok(Json(ReadyResponse {
+        status: "ready",
+        service: "box-host",
+        exec_ready: true,
+        desktop_ready,
+    }))
 }
 
 async fn info(State(state): State<AppState>) -> Json<InfoResponse> {
@@ -152,9 +173,9 @@ async fn info(State(state): State<AppState>) -> Json<InfoResponse> {
         capabilities: Capabilities {
             exec: true,
             files: true,
-            desktop: false,
-            chrome: false,
-            cua: false,
+            desktop: state.desktop.probe_display(),
+            chrome: probe_chrome(&state.chrome).running,
+            cua: state.cua.capability_ready(),
         },
         endpoints: Endpoints {
             exec: state.exec_url.clone(),
@@ -162,6 +183,15 @@ async fn info(State(state): State<AppState>) -> Json<InfoResponse> {
         },
         workspace: state.workspace.clone(),
     })
+}
+
+async fn desktop(State(state): State<AppState>) -> Json<DesktopStatus> {
+    let host = advertised_host(&state.host_bind);
+    Json(DesktopStatus::from_config(&state.desktop, &host))
+}
+
+async fn chrome(State(state): State<AppState>) -> Json<ChromeStatus> {
+    Json(probe_chrome(&state.chrome))
 }
 
 async fn require_token(
@@ -254,6 +284,9 @@ mod tests {
             workspace: "/workspace".into(),
             exec_url: "http://127.0.0.1:1337".into(),
             host_bind: "0.0.0.0:1340".into(),
+            desktop: DesktopConfig::disabled(),
+            chrome: ChromeConfig::disabled(),
+            cua: CuaConfig::disabled(),
         }
     }
 
@@ -318,8 +351,56 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["box_id"], "test-box");
         assert_eq!(body["capabilities"]["exec"], true);
-        assert_eq!(body["capabilities"]["cua"], false);
+        assert_eq!(body["capabilities"]["files"], true);
         assert_eq!(body["capabilities"]["desktop"], false);
+        assert_eq!(body["capabilities"]["chrome"], false);
+        assert_eq!(body["capabilities"]["cua"], false);
+    }
+
+    #[tokio::test]
+    async fn chrome_ok_when_disabled() {
+        let (status, body) = send(
+            Request::builder()
+                .uri("/v1/chrome")
+                .header("authorization", "Bearer host-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["enabled"], false);
+        assert_eq!(body["running"], false);
+        assert!(body["cdp"].is_null());
+    }
+
+    #[tokio::test]
+    async fn desktop_rejects_missing_auth() {
+        let (status, body) = send(
+            Request::builder()
+                .uri("/v1/desktop")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"]["code"], "unauthorized");
+    }
+
+    #[tokio::test]
+    async fn desktop_ok_when_disabled() {
+        let (status, body) = send(
+            Request::builder()
+                .uri("/v1/desktop")
+                .header("authorization", "Bearer host-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["available"], false);
+        assert_eq!(body["display"], ":1");
+        assert_eq!(body["viewer"]["port"], 6080);
+        assert_eq!(body["viewer"]["path"], "/vnc.html");
     }
 
     #[test]
