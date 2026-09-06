@@ -224,6 +224,7 @@ fn kill_process_group(child: &mut tokio::process::Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use box_cua::CuaConfig;
 
     #[test]
     fn clamp_respects_max() {
@@ -234,6 +235,7 @@ mod tests {
             default_timeout: Duration::from_secs(30),
             max_timeout: Duration::from_secs(60),
             max_output_bytes: 8,
+            cua: CuaConfig::disabled(),
         };
         assert_eq!(
             clamp_timeout(&state, Some(120_000)),

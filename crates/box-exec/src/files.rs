@@ -224,7 +224,7 @@ pub async fn put(
         .as_str()
     {
         "utf8" | "text" => req.content.into_bytes(),
-        "base64" => b64::decode(&req.content).map_err(|err| ApiError::invalid_request(err))?,
+        "base64" => b64::decode(&req.content).map_err(ApiError::invalid_request)?,
         other => {
             return Err(ApiError::invalid_request(format!(
                 "unsupported encoding '{other}'"
