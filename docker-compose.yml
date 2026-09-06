@@ -4,20 +4,32 @@ services:
       context: .
       dockerfile: docker/Dockerfile
     image: grok-box:local
+    shm_size: "256mb"
     environment:
       BOX_TOKEN: ${BOX_TOKEN:-dev-box-token}
       BOX_ID: ${BOX_ID:-local-dev}
       RUST_LOG: ${RUST_LOG:-info}
       WORKSPACE_ROOT: /workspace
+      BOX_DESKTOP: ${BOX_DESKTOP:-1}
+      BOX_DESKTOP_REQUIRED: ${BOX_DESKTOP_REQUIRED:-1}
+      BOX_DISPLAY: ${BOX_DISPLAY:-:1}
+      BOX_DISPLAY_GEOM: ${BOX_DISPLAY_GEOM:-1280x800x24}
+      BOX_VNC_BIND: ${BOX_VNC_BIND:-127.0.0.1:5900}
+      BOX_NOVNC_PORT: ${BOX_NOVNC_PORT:-6080}
+      BOX_CHROME: ${BOX_CHROME:-1}
+      BOX_CHROME_PROFILE: /home/box/chrome-profile
+      BOX_CDP_PORT: ${BOX_CDP_PORT:-9222}
+      BOX_CUA: ${BOX_CUA:-1}
     ports:
       - "1337:1337"
       - "1340:1340"
+      - "6080:6080"
     volumes:
       - ./workspace-data:/workspace
       - ./chrome-profile:/home/box/chrome-profile
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:1337/v1/health"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:1340/v1/health"]
       interval: 5s
       timeout: 3s
       retries: 12
-      start_period: 15s
+      start_period: 25s
