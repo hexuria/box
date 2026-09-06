@@ -1,0 +1,11 @@
+[package]
+name = "box-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Phase 2 stub: Xvfb + x11vnc + noVNC desktop for grok-box"
+rust-version.workspace = true
+publish = false
+
+[dependencies]

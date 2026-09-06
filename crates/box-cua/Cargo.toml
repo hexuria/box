@@ -1,0 +1,11 @@
+[package]
+name = "box-cua"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Phase 2 stub: Computer Use (screenshot / click / type) against the box display"
+rust-version.workspace = true
+publish = false
+
+[dependencies]
