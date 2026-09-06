@@ -1,0 +1,288 @@
+openapi: 3.1.0
+info:
+  title: grok-box Phase 1
+  description: |
+    Layer 3 sandboxed agent computer. Two processes share this document:
+    box-exec (port 1337) and box-host (port 1340). Neither service performs
+    model inference.
+  version: 0.1.0
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://127.0.0.1:1337
+    description: box-exec (Compose)
+  - url: http://127.0.0.1:1340
+    description: box-host (Compose)
+
+tags:
+  - name: exec
+    description: box-exec — commands and workspace files
+  - name: host
+    description: box-host — identity and readiness
+
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, status]
+          properties:
+            code: { type: string, examples: [unauthorized, path_escape] }
+            message: { type: string }
+            status: { type: integer }
+    Health:
+      type: object
+      required: [status, service, version]
+      properties:
+        status: { type: string, examples: [ok] }
+        service: { type: string }
+        version: { type: string }
+    ExecRequest:
+      type: object
+      required: [command]
+      properties:
+        command:
+          oneOf:
+            - type: array
+              items: { type: string }
+              minItems: 1
+            - type: string
+              minLength: 1
+        cwd: { type: string, description: Relative or absolute path inside the workspace jail }
+        timeout_ms: { type: integer, minimum: 1 }
+        env:
+          type: object
+          additionalProperties: { type: string }
+        stdin: { type: string, nullable: true }
+    ExecResponse:
+      type: object
+      required: [stdout, stderr, timed_out, duration_ms, truncated, cwd]
+      properties:
+        stdout: { type: string }
+        stderr: { type: string }
+        exit_code: { type: integer, nullable: true }
+        timed_out: { type: boolean }
+        duration_ms: { type: integer }
+        truncated: { type: boolean }
+        cwd: { type: string }
+    FileGet:
+      oneOf:
+        - type: object
+          required: [kind, path, size, encoding, content]
+          properties:
+            kind: { type: string, enum: [file] }
+            path: { type: string }
+            size: { type: integer }
+            encoding: { type: string, enum: [utf8, base64] }
+            content: { type: string }
+        - type: object
+          required: [kind, path, entries]
+          properties:
+            kind: { type: string, enum: [directory] }
+            path: { type: string }
+            entries:
+              type: array
+              items:
+                type: object
+                required: [name, kind]
+                properties:
+                  name: { type: string }
+                  kind: { type: string }
+                  size: { type: integer, nullable: true }
+    FilePutRequest:
+      type: object
+      required: [path, content]
+      properties:
+        path: { type: string }
+        content: { type: string }
+        encoding: { type: string, enum: [utf8, text, base64], default: utf8 }
+        create_dirs: { type: boolean, default: true }
+    FilePutResponse:
+      type: object
+      required: [path, bytes_written]
+      properties:
+        path: { type: string }
+        bytes_written: { type: integer }
+    Ready:
+      type: object
+      required: [status, service, exec_ready]
+      properties:
+        status: { type: string }
+        service: { type: string }
+        exec_ready: { type: boolean }
+    Info:
+      type: object
+      required: [box_id, service, protocol, version, capabilities, endpoints, workspace]
+      properties:
+        box_id: { type: string }
+        service: { type: string }
+        protocol: { type: string }
+        version:
+          type: object
+          properties:
+            box_host: { type: string }
+            box_exec: { type: string }
+            protocol: { type: string }
+        capabilities:
+          type: object
+          properties:
+            exec: { type: boolean }
+            files: { type: boolean }
+            desktop: { type: boolean }
+            chrome: { type: boolean }
+            cua: { type: boolean }
+        endpoints:
+          type: object
+          properties:
+            exec: { type: string }
+            host: { type: string }
+        workspace: { type: string }
+
+paths:
+  /v1/health:
+    get:
+      tags: [exec, host]
+      summary: Liveness
+      security: []
+      responses:
+        "200":
+          description: Process is up
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+
+  /v1/ready:
+    get:
+      tags: [host]
+      summary: Readiness (box-host only)
+      description: 200 when box-exec /v1/health succeeds.
+      security: []
+      responses:
+        "200":
+          description: Exec is reachable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Ready" }
+        "503":
+          description: Exec is down
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /v1/info:
+    get:
+      tags: [host]
+      summary: Box identity and capabilities (box-host only)
+      security: [{ bearer: [] }]
+      responses:
+        "200":
+          description: Info
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Info" }
+        "401":
+          description: Missing or wrong token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /v1/exec:
+    post:
+      tags: [exec]
+      summary: Run a command (box-exec only)
+      security: [{ bearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ExecRequest" }
+      responses:
+        "200":
+          description: Command finished or timed out
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExecResponse" }
+        "400":
+          description: Invalid request or spawn failure
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401":
+          description: Missing or wrong token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /v1/files:
+    get:
+      tags: [exec]
+      summary: Read a file or list a directory (box-exec only)
+      security: [{ bearer: [] }]
+      parameters:
+        - in: query
+          name: path
+          schema: { type: string }
+          description: Workspace-relative or jailed absolute path
+        - in: query
+          name: encoding
+          schema: { type: string, enum: [utf8, text, base64] }
+      responses:
+        "200":
+          description: File or directory
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FileGet" }
+        "400":
+          description: Path escape or bad encoding
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401":
+          description: Missing or wrong token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+    put:
+      tags: [exec]
+      summary: Write a file (box-exec only)
+      security: [{ bearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FilePutRequest" }
+      responses:
+        "200":
+          description: Written
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FilePutResponse" }
+        "400":
+          description: Path escape or invalid body
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401":
+          description: Missing or wrong token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "413":
+          description: Payload too large
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
