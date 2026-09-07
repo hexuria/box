@@ -1,7 +1,10 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
+import { loginMatches, requireL1Session, sessionCookieOptions, SESSION_COOKIE } from "./auth";
+import { tryGetL1Token } from "./config";
 import * as ensurebox from "./ensurebox";
 import { EnsureboxError } from "./ensurebox";
 
@@ -26,11 +29,42 @@ function fail(err: unknown): { error: string } {
   return { error: err instanceof Error ? err.message : String(err) };
 }
 
+export async function loginAction(
+  _prev: { error: string } | null,
+  formData: FormData,
+): Promise<{ error: string } | null> {
+  const loaded = tryGetL1Token();
+  if ("error" in loaded) {
+    return { error: loaded.error };
+  }
+  const presented = String(formData.get("token") || "");
+  if (!loginMatches(presented)) {
+    return { error: "invalid token" };
+  }
+  const jar = await cookies();
+  jar.set(sessionCookieOptions(presented));
+  redirect("/");
+}
+
+export async function logoutAction() {
+  const jar = await cookies();
+  jar.set({
+    name: SESSION_COOKIE,
+    value: "",
+    httpOnly: true,
+    sameSite: "lax",
+    path: "/",
+    maxAge: 0,
+  });
+  redirect("/");
+}
+
 export async function createBoxAction(
   _prev: { error: string } | null,
   formData: FormData,
 ): Promise<{ error: string } | null> {
   try {
+    await requireL1Session();
     const name = String(formData.get("name") || "").trim();
     const box = await ensurebox.createBox(name || undefined);
     revalidatePath("/");
@@ -41,6 +75,7 @@ export async function createBoxAction(
 }
 
 export async function startBoxAction(id: string) {
+  await requireL1Session();
   await ensurebox.startBox(id);
   revalidatePath("/");
   revalidatePath(`/boxes/${id}`);
@@ -52,6 +87,7 @@ export async function execAction(
   formData: FormData,
 ): Promise<{ error?: string; result?: unknown }> {
   try {
+    await requireL1Session();
     const command = String(formData.get("command") || "").trim();
     if (!command) {
       return { error: "command is required" };
@@ -70,6 +106,7 @@ export async function writeFileAction(
   formData: FormData,
 ): Promise<{ error?: string; result?: unknown }> {
   try {
+    await requireL1Session();
     const path = String(formData.get("path") || "").trim();
     const content = String(formData.get("content") || "");
     if (!path) {
@@ -88,6 +125,7 @@ export async function readFileAction(
   formData: FormData,
 ): Promise<{ error?: string; result?: unknown }> {
   try {
+    await requireL1Session();
     const path = String(formData.get("path") || "").trim();
     if (!path) {
       return { error: "path is required" };
@@ -103,6 +141,7 @@ export async function screenshotAction(
   id: string,
 ): Promise<{ error?: string; png?: string; width?: number; height?: number }> {
   try {
+    await requireL1Session();
     const result = await ensurebox.screenshot(id);
     if (!result.png_base64) {
       return { error: "EnsureBox screenshot response missing png_base64" };
@@ -123,6 +162,7 @@ export async function clickAction(
   y: number,
 ): Promise<{ error?: string; ok?: boolean }> {
   try {
+    await requireL1Session();
     await ensurebox.click(id, x, y, 1);
     return { ok: true };
   } catch (err) {
@@ -135,6 +175,7 @@ export async function typeAction(
   text: string,
 ): Promise<{ error?: string; ok?: boolean }> {
   try {
+    await requireL1Session();
     await ensurebox.typeText(id, text);
     return { ok: true };
   } catch (err) {
@@ -147,6 +188,7 @@ export async function keyAction(
   key: string,
 ): Promise<{ error?: string; ok?: boolean }> {
   try {
+    await requireL1Session();
     await ensurebox.sendKey(id, key);
     return { ok: true };
   } catch (err) {
@@ -160,6 +202,7 @@ export async function scrollAction(
   dy: number,
 ): Promise<{ error?: string; ok?: boolean }> {
   try {
+    await requireL1Session();
     await ensurebox.scroll(id, { x: 640, y: 400, dx, dy });
     return { ok: true };
   } catch (err) {
