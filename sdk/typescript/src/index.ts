@@ -69,6 +69,45 @@ export type ScreenshotResponse = {
 
 export type CuaOk = { ok: boolean };
 
+export type RecipeScreenshot = "none" | "end" | "each";
+
+export type RecipeStep =
+  | { op: "click"; x: number; y: number; button?: number }
+  | { op: "double_click" | "double-click"; x: number; y: number; button?: number }
+  | { op: "move"; x: number; y: number }
+  | { op: "drag"; x1: number; y1: number; x2: number; y2: number; button?: number }
+  | { op: "type"; text: string }
+  | { op: "key"; key: string }
+  | { op: "scroll"; x: number; y: number; dx: number; dy: number }
+  | { op: "wait"; ms: number }
+  | { op: "screenshot" };
+
+export type RecipeRequest = {
+  name?: string;
+  stop_on_error?: boolean;
+  screenshot?: RecipeScreenshot;
+  steps: RecipeStep[];
+};
+
+export type RecipeStepResult = {
+  index: number;
+  op: string;
+  ok: boolean;
+  ms: number;
+  error?: string;
+  screenshot?: ScreenshotResponse;
+};
+
+export type RecipeResponse = {
+  ok: boolean;
+  name?: string;
+  ran: number;
+  stopped_at?: number;
+  duration_ms: number;
+  steps: RecipeStepResult[];
+  screenshot?: ScreenshotResponse;
+};
+
 export class GrokBox {
   private constructor(
     readonly execUrl: string,
@@ -184,6 +223,11 @@ export class GrokBox {
 
   async scroll(x: number, y: number, dx: number, dy: number): Promise<CuaOk> {
     return this.authJson("POST", `${this.execUrl}/v1/cua/scroll`, { x, y, dx, dy });
+  }
+
+  /** Many CUA steps in one request. The guest lints the plan before actuating. */
+  async recipe(request: RecipeRequest): Promise<RecipeResponse> {
+    return this.authJson("POST", `${this.execUrl}/v1/cua/recipe`, request, 120_000);
   }
 
   private async publicJson(url: string): Promise<unknown> {

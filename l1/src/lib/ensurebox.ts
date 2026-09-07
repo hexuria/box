@@ -233,6 +233,21 @@ export async function scroll(
   });
 }
 
+export async function runRecipe(
+  id: string,
+  body: {
+    name?: string;
+    stop_on_error?: boolean;
+    screenshot?: "none" | "end" | "each";
+    steps: unknown[];
+  },
+): Promise<unknown> {
+  return request(`/api/v1/boxes/${id}/cua/recipe`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  }, 120_000);
+}
+
 export type ConnectionStatus = {
   url: string;
   reachable: boolean;

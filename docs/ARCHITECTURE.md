@@ -133,7 +133,7 @@ CUA is first-party in this image:
 - Screenshot: ImageMagick `import -window root` (fallback: `scrot`). JSON (base64) **or** raw `image/png` (`Accept: image/png` or `?format=png`)
 - Pointer/keyboard: `xdotool` on `DISPLAY=:1`
 - Coordinate space = X framebuffer **1280×800** (see `BOX_DISPLAY_GEOM`), origin top-left
-- Verbs: screenshot, click, double-click, move (hover), drag, type, key, scroll
+- Verbs: screenshot, click, double-click, move (hover), drag, type, key, scroll, **recipe** (many of those in one HTTP call — [RECIPES.md](RECIPES.md))
 - Endpoints live on `box-exec` and share `BOX_TOKEN`
 
 **trycua** is not vendored and is not on the guest path. Windows/macOS remain clients or Docker hosts, not a native grok-box OS.
