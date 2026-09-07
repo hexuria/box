@@ -77,7 +77,13 @@ echo "${out}"
 echo "${out}" | grep -q '"exit_code":0'
 echo "${out}" | grep -q ok
 
-echo "==> files put/get"
+echo "==> files put/get/mkdir/delete"
+curl -fsS \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -X POST \
+  -d '{"path":"smoke-dir","parents":true}' \
+  "${EXEC_URL}/v1/files/mkdir" | grep -q '"created":true'
 curl -fsS \
   -H "Authorization: Bearer ${TOKEN}" \
   -H "Content-Type: application/json" \
@@ -88,6 +94,23 @@ got="$(curl -fsS \
   -H "Authorization: Bearer ${TOKEN}" \
   "${EXEC_URL}/v1/files?path=smoke.txt")"
 echo "${got}" | grep -q hello
+curl -fsS \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -X DELETE \
+  "${EXEC_URL}/v1/files?path=smoke.txt" | grep -q '"deleted":true'
+
+echo "==> exec does not leak BOX_TOKEN"
+token_env="$(curl -fsS \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"command":["sh","-c","if [ -n \"${BOX_TOKEN+x}\" ]; then echo LEAKED; else echo STRIPPED; fi"]}' \
+  "${EXEC_URL}/v1/exec")"
+echo "${token_env}"
+echo "${token_env}" | grep -q STRIPPED
+if echo "${token_env}" | grep -q LEAKED; then
+  echo "BOX_TOKEN leaked into exec child" >&2
+  exit 1
+fi
 
 echo "==> auth reject"
 code="$(curl -s -o /dev/null -w '%{http_code}' \
@@ -108,6 +131,7 @@ echo "${info}" | grep -q '"files":true'
 echo "${info}" | grep -q '"desktop":true'
 echo "${info}" | grep -q '"chrome":true'
 echo "${info}" | grep -q '"cua":true'
+echo "${info}" | grep -q '"scope":"container-local"'
 
 echo "==> GET /v1/desktop (host)"
 desk="$(curl -fsS -H "Authorization: Bearer ${TOKEN}" "${HOST_URL}/v1/desktop")"
@@ -177,11 +201,46 @@ click="$(curl -fsS \
 echo "${click}"
 echo "${click}" | grep -q '"ok":true'
 
+echo "==> POST /v1/cua/screenshot?format=png"
+png_code="$(curl -sS -o /tmp/grok-box-smoke.png -w '%{http_code}' \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Accept: image/png" \
+  -X POST \
+  "${EXEC_URL}/v1/cua/screenshot?format=png")"
+if [[ "${png_code}" != "200" ]]; then
+  echo "raw PNG screenshot expected 200, got ${png_code}" >&2
+  exit 1
+fi
+head -c 8 /tmp/grok-box-smoke.png | grep -q $'\x89PNG' || {
+  echo "raw screenshot was not a PNG" >&2
+  exit 1
+}
+
+echo "==> POST /v1/cua/move + double-click + drag"
+move="$(curl -fsS \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"x":100,"y":100}' \
+  "${EXEC_URL}/v1/cua/move")"
+echo "${move}" | grep -q '"ok":true'
+dbl="$(curl -fsS \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"x":100,"y":100}' \
+  "${EXEC_URL}/v1/cua/double-click")"
+echo "${dbl}" | grep -q '"ok":true'
+drag="$(curl -fsS \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"x1":100,"y1":100,"x2":120,"y2":120}' \
+  "${EXEC_URL}/v1/cua/drag")"
+echo "${drag}" | grep -q '"ok":true'
+
 echo "==> BOX_DESKTOP=0 still serves exec+host"
 "${COMPOSE[@]}" down --remove-orphans >/dev/null 2>&1 || true
-BOX_DESKTOP=0 BOX_DESKTOP_REQUIRED=0 "${COMPOSE[@]}" up -d
+BOX_DESKTOP=0 BOX_DESKTOP_REQUIRED=0 "${COMPOSE[@]}" up -d --force-recreate
 ok=0
-for _ in $(seq 1 60); do
+for _ in $(seq 1 90); do
   if curl -fsS "${EXEC_URL}/v1/health" >/dev/null 2>&1 \
     && curl -fsS "${HOST_URL}/v1/health" >/dev/null 2>&1; then
     ok=1
