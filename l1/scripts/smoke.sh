@@ -24,8 +24,16 @@ assert eb.get("authorized") is True, body
 print("ok")
 '
 
-echo "== L1 home page =="
+echo "== L1 home is a workspace client, not an ops console =="
 html="$(curl -fsS --max-time 15 "$BASE/")"
-echo "$html" | grep -q "Layer 1 client"
-echo "$html" | grep -q "Talks only to EnsureBox"
+echo "$html" | grep -q "Workspaces"
+echo "$html" | grep -q "New workspace"
+if echo "$html" | grep -q "Connected to EnsureBox"; then
+  echo "L1 home must not show a hero EnsureBox connection banner" >&2
+  exit 1
+fi
+if echo "$html" | grep -E 'exec :[0-9]|host :[0-9]|viewer :[0-9]'; then
+  echo "L1 home must not advertise guest host ports" >&2
+  exit 1
+fi
 echo "ok"

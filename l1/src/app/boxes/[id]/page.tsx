@@ -1,23 +1,28 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { AutoRefresh } from "@/components/auto-refresh";
-import { BoxLifecycleButtons } from "@/components/box-lifecycle-buttons";
 import { BoxTools } from "@/components/box-tools";
 import { Shell } from "@/components/shell";
+import { WakeButton } from "@/components/wake-button";
 import { Badge } from "@/components/ui/badge";
 import { buttonVariants } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { EnsureboxError, getBox, getInfo } from "@/lib/ensurebox";
-import type { Capabilities } from "@/lib/types";
+import { EnsureboxError, getBox } from "@/lib/ensurebox";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
+
+function humanStatus(status: string) {
+  if (status === "ready") {
+    return "Ready";
+  }
+  if (status === "creating") {
+    return "Starting";
+  }
+  if (status === "error") {
+    return "Error";
+  }
+  return "Offline";
+}
 
 export default async function BoxPage({
   params,
@@ -35,18 +40,12 @@ export default async function BoxPage({
     throw err;
   }
 
-  let capabilities: Capabilities | null = null;
-  if (box.status === "ready") {
-    try {
-      const info = await getInfo(id);
-      capabilities = info.capabilities ?? null;
-    } catch {
-      capabilities = null;
-    }
-  }
-
   const toolsDisabled = box.status !== "ready";
   const waiting = box.status === "creating";
+  const asleep =
+    box.status === "stopped" ||
+    box.status === "hibernated" ||
+    box.status === "error";
 
   return (
     <Shell>
@@ -55,18 +54,36 @@ export default async function BoxPage({
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div>
             <Link href="/" className="text-sm text-zinc-500 hover:text-zinc-800">
-              ← All boxes
+              ← Workspaces
             </Link>
             <h1 className="mt-2 text-2xl font-semibold tracking-tight">{box.name}</h1>
-            <p className="font-mono text-sm text-zinc-500">{box.id}</p>
           </div>
-          <Badge>{box.status}</Badge>
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge>{humanStatus(box.status)}</Badge>
+            <WakeButton id={box.id} status={box.status} />
+            {!asleep ? (
+              <a
+                className={buttonVariants({ variant: "outline" })}
+                href={box.endpoints.viewer}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Open live desktop
+              </a>
+            ) : null}
+          </div>
         </div>
 
         {waiting ? (
           <p className="rounded-lg border border-zinc-200 bg-white p-3 text-sm text-zinc-600">
-            EnsureBox is still creating this guest. This page refreshes until
-            status is ready.
+            This workspace is still starting. The page refreshes until it is
+            ready.
+          </p>
+        ) : null}
+
+        {asleep ? (
+          <p className="rounded-lg border border-zinc-200 bg-white p-3 text-sm text-zinc-600">
+            This workspace is offline. Start it to use the shell and desktop.
           </p>
         ) : null}
 
@@ -76,76 +93,14 @@ export default async function BoxPage({
           </p>
         ) : null}
 
-        <Card>
-          <CardHeader>
-            <CardTitle>Lifecycle</CardTitle>
-            <CardDescription>
-              Stop, hibernate, start, and destroy are EnsureBox API calls. This
-              client never talks to Docker.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <BoxLifecycleButtons id={box.id} status={box.status} />
-          </CardContent>
-        </Card>
+        {!asleep ? (
+          <p className="text-sm text-zinc-600">
+            Live desktop password{" "}
+            <span className="font-mono">{box.vncPassword}</span>
+          </p>
+        ) : null}
 
-        <Card>
-          <CardHeader>
-            <CardTitle>Desktop viewer</CardTitle>
-            <CardDescription>
-              The live viewer URL comes from EnsureBox. Opening it in a browser
-              tab is optional; shell and CUA still go through L2.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3 text-sm">
-            <p>
-              Viewer{" "}
-              <a
-                className="font-mono text-primary underline-offset-2 hover:underline"
-                href={box.endpoints.viewer}
-                target="_blank"
-                rel="noreferrer"
-              >
-                {box.endpoints.viewer}
-              </a>
-            </p>
-            <p>
-              VNC password{" "}
-              <span className="font-mono">{box.vncPassword}</span>
-            </p>
-            {capabilities ? (
-              <p className="text-zinc-600">
-                capabilities:{" "}
-                {Object.entries(capabilities)
-                  .filter(([, on]) => on)
-                  .map(([name]) => name)
-                  .join(", ") || "none"}
-              </p>
-            ) : null}
-            <a
-              className={buttonVariants({ variant: "outline" })}
-              href={box.endpoints.viewer}
-              target="_blank"
-              rel="noreferrer"
-            >
-              Open live desktop
-            </a>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Tools</CardTitle>
-            <CardDescription>
-              Exec, files, and computer use POST to EnsureBox{" "}
-              <code>/api/v1/boxes/{box.id}/…</code>. Disabled unless the guest
-              is ready.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <BoxTools id={box.id} disabled={toolsDisabled} />
-          </CardContent>
-        </Card>
+        <BoxTools id={box.id} disabled={toolsDisabled} />
       </div>
     </Shell>
   );

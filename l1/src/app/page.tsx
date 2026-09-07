@@ -16,6 +16,19 @@ import type { PublicBox } from "@/lib/types";
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
 
+function humanStatus(status: string) {
+  if (status === "ready") {
+    return "Ready";
+  }
+  if (status === "creating") {
+    return "Starting";
+  }
+  if (status === "error") {
+    return "Error";
+  }
+  return "Offline";
+}
+
 function statusVariant(status: string) {
   if (status === "ready") {
     return "default" as const;
@@ -38,7 +51,7 @@ export default async function HomePage() {
       loadError = err instanceof EnsureboxError ? err.message : String(err);
     }
   } else if (status.reachable && status.authorized === false) {
-    loadError = "EnsureBox rejected this client's token.";
+    loadError = "The control plane rejected this client.";
   } else {
     loadError = status.message;
   }
@@ -49,11 +62,10 @@ export default async function HomePage() {
     <Shell>
       <div className="space-y-6">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Boxes</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">Workspaces</h1>
           <p className="mt-1 max-w-2xl text-sm text-zinc-600">
-            This is the Layer 1 client. Every action here is an HTTP call to
-            EnsureBox. The guest token never leaves L2, and this app does not
-            talk to box-exec, box-host, or SSH.
+            Open a box to run a shell, read and write files, and use the
+            desktop. Guest tokens never reach this client.
           </p>
         </div>
 
@@ -61,10 +73,9 @@ export default async function HomePage() {
 
         <Card>
           <CardHeader>
-            <CardTitle>Create</CardTitle>
+            <CardTitle>New workspace</CardTitle>
             <CardDescription>
-              EnsureBox starts a grok-box guest, waits until it is ready, and
-              keeps the token server-side. This client only sees the public box.
+              Starts a Linux desktop you can drive from here.
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -75,7 +86,7 @@ export default async function HomePage() {
         {loadError && boxes.length === 0 ? (
           <Card>
             <CardHeader>
-              <CardTitle>Cannot list boxes</CardTitle>
+              <CardTitle>Can&apos;t reach your boxes</CardTitle>
               <CardDescription>{loadError}</CardDescription>
             </CardHeader>
           </Card>
@@ -84,11 +95,9 @@ export default async function HomePage() {
         {!loadError && boxes.length === 0 ? (
           <Card>
             <CardHeader>
-              <CardTitle>No boxes yet</CardTitle>
+              <CardTitle>No workspaces yet</CardTitle>
               <CardDescription>
-                Create one after EnsureBox can see a <code>grok-box:local</code>{" "}
-                image. If L2 is down, start it with{" "}
-                <code>cd ensurebox && npm run dev</code>.
+                Create one to open a desktop and a shell.
               </CardDescription>
             </CardHeader>
           </Card>
@@ -102,18 +111,17 @@ export default async function HomePage() {
                   <CardHeader className="flex flex-row items-start justify-between gap-3">
                     <div>
                       <CardTitle>{box.name}</CardTitle>
-                      <CardDescription className="font-mono">
-                        {box.id}
-                      </CardDescription>
+                      <CardDescription>{box.id}</CardDescription>
                     </div>
-                    <Badge variant={statusVariant(box.status)}>{box.status}</Badge>
+                    <Badge variant={statusVariant(box.status)}>
+                      {humanStatus(box.status)}
+                    </Badge>
                   </CardHeader>
-                  <CardContent className="text-sm text-zinc-600">
-                    {box.image}
-                    {box.error ? (
-                      <p className="mt-2 text-destructive">{box.error}</p>
-                    ) : null}
-                  </CardContent>
+                  {box.error ? (
+                    <CardContent className="text-sm text-destructive">
+                      {box.error}
+                    </CardContent>
+                  ) : null}
                 </Card>
               </Link>
             ))}
