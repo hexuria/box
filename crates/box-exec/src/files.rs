@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 
 mod b64 {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/" ;
 
     pub fn encode(input: &[u8]) -> String {
         let mut out = String::new();
@@ -108,6 +108,30 @@ pub struct FilePutRequest {
 pub struct FilePutResponse {
     pub path: String,
     pub bytes_written: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FileDeleteQuery {
+    pub path: Option<String>,
+    pub recursive: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FileDeleteResponse {
+    pub path: String,
+    pub deleted: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MkdirRequest {
+    pub path: String,
+    pub parents: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MkdirResponse {
+    pub path: String,
+    pub created: bool,
 }
 
 pub async fn get(
@@ -261,6 +285,111 @@ pub async fn put(
     Ok(Json(FilePutResponse {
         path: display_under_workspace(&state.workspace, &resolved),
         bytes_written: bytes.len() as u64,
+    }))
+}
+
+pub async fn delete(
+    State(state): State<AppState>,
+    Query(query): Query<FileDeleteQuery>,
+) -> Result<Json<FileDeleteResponse>, ApiError> {
+    let user_path = query.path.as_deref().unwrap_or("");
+    if user_path.is_empty() {
+        return Err(ApiError::invalid_request("path is required"));
+    }
+    let resolved = resolve_in_jail(&state.workspace, user_path)?;
+    let root = resolve_in_jail(&state.workspace, "")?;
+    if resolved == root {
+        return Err(ApiError::invalid_request(
+            "refusing to delete the workspace root",
+        ));
+    }
+
+    let meta = tokio::fs::metadata(&resolved).await.map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            ApiError::not_found(format!("not found: {}", resolved.display()))
+        } else {
+            ApiError::io(err.to_string())
+        }
+    })?;
+
+    let recursive = matches!(
+        query
+            .recursive
+            .as_deref()
+            .map(|s| s.to_ascii_lowercase())
+            .as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    );
+
+    if meta.is_dir() {
+        if recursive {
+            tokio::fs::remove_dir_all(&resolved)
+                .await
+                .map_err(|err| ApiError::io(err.to_string()))?;
+        } else {
+            tokio::fs::remove_dir(&resolved).await.map_err(|err| {
+                if err.kind() == std::io::ErrorKind::DirectoryNotEmpty {
+                    ApiError::invalid_request(
+                        "directory is not empty; pass recursive=true to delete it",
+                    )
+                } else {
+                    ApiError::io(err.to_string())
+                }
+            })?;
+        }
+    } else {
+        tokio::fs::remove_file(&resolved)
+            .await
+            .map_err(|err| ApiError::io(err.to_string()))?;
+    }
+
+    Ok(Json(FileDeleteResponse {
+        path: display_under_workspace(&state.workspace, &resolved),
+        deleted: true,
+    }))
+}
+
+pub async fn mkdir(
+    State(state): State<AppState>,
+    Json(req): Json<MkdirRequest>,
+) -> Result<Json<MkdirResponse>, ApiError> {
+    if req.path.is_empty() {
+        return Err(ApiError::invalid_request("path is required"));
+    }
+    let resolved = resolve_in_jail(&state.workspace, &req.path)?;
+    let root = resolve_in_jail(&state.workspace, "")?;
+    if resolved == root {
+        return Ok(Json(MkdirResponse {
+            path: display_under_workspace(&state.workspace, &resolved),
+            created: false,
+        }));
+    }
+
+    if resolved.exists() {
+        if resolved.is_dir() {
+            return Ok(Json(MkdirResponse {
+                path: display_under_workspace(&state.workspace, &resolved),
+                created: false,
+            }));
+        }
+        return Err(ApiError::invalid_request(
+            "path exists and is not a directory",
+        ));
+    }
+
+    if req.parents.unwrap_or(true) {
+        tokio::fs::create_dir_all(&resolved)
+            .await
+            .map_err(|err| ApiError::io(err.to_string()))?;
+    } else {
+        tokio::fs::create_dir(&resolved)
+            .await
+            .map_err(|err| ApiError::io(err.to_string()))?;
+    }
+
+    Ok(Json(MkdirResponse {
+        path: display_under_workspace(&state.workspace, &resolved),
+        created: true,
     }))
 }
 
