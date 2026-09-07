@@ -28,6 +28,7 @@ pub fn app(state: AppState) -> Router {
         .route("/v1/cua/type", post(cua::type_handler))
         .route("/v1/cua/key", post(cua::key_handler))
         .route("/v1/cua/scroll", post(cua::scroll_handler))
+        .route("/v1/cua/recipe", post(cua::recipe_handler))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
 
     Router::new()
