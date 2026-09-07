@@ -7,6 +7,8 @@ import type {
   FileResult,
   PublicBox,
   ReadyResponse,
+  RecipeReceipt,
+  RecipeRequest,
   ScreenshotResult,
 } from "./types";
 
@@ -235,14 +237,9 @@ export async function scroll(
 
 export async function runRecipe(
   id: string,
-  body: {
-    name?: string;
-    stop_on_error?: boolean;
-    screenshot?: "none" | "end" | "each";
-    steps: unknown[];
-  },
-): Promise<unknown> {
-  return request(`/api/v1/boxes/${id}/cua/recipe`, {
+  body: RecipeRequest,
+): Promise<RecipeReceipt> {
+  return request<RecipeReceipt>(`/api/v1/boxes/${id}/cua/recipe`, {
     method: "POST",
     body: JSON.stringify(body),
   }, 120_000);
