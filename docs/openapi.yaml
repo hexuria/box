@@ -48,11 +48,9 @@ components:
             status: { type: integer }
     Health:
       type: object
-      required: [status, service, version]
+      required: [status]
       properties:
         status: { type: string, examples: [ok] }
-        service: { type: string }
-        version: { type: string }
     ExecRequest:
       type: object
       required: [command]
@@ -257,6 +255,7 @@ paths:
     get:
       tags: [exec, host]
       summary: Liveness
+      description: Public probe. Body is only `{"status":"ok"}` (no service fingerprint).
       security: []
       responses:
         "200":
@@ -269,14 +268,19 @@ paths:
     get:
       tags: [host]
       summary: Readiness (box-host only)
-      description: 200 when box-exec /v1/health succeeds and the X display is up when BOX_DESKTOP_REQUIRED=1.
-      security: []
+      description: 200 when box-exec /v1/health succeeds and the X display is up when BOX_DESKTOP_REQUIRED=1. Requires Bearer.
+      security: [{ bearer: [] }]
       responses:
         "200":
           description: Exec is reachable
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Ready" }
+        "401":
+          description: Missing or invalid bearer token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
         "503":
           description: Exec is down
           content:
