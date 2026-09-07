@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { CreateBoxForm } from "@/components/create-box-form";
+import { LoginForm } from "@/components/login-form";
 import { Shell } from "@/components/shell";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -9,9 +10,10 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { listPublicBoxes } from "@/lib/lifecycle";
-import { GROK_BOX_IMAGE } from "@/lib/config";
-import type { PublicBox } from "@/lib/types";
+import { isOperatorAuthed } from "@/lib/auth";
+import { GROK_BOX_IMAGE, tryGetEnsureboxToken } from "@/lib/config";
+import { listOperatorBoxes } from "@/lib/lifecycle";
+import type { OperatorBox } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
@@ -25,7 +27,7 @@ function statusVariant(status: string) {
   return "secondary" as const;
 }
 
-function containerState(box: PublicBox) {
+function containerState(box: OperatorBox) {
   if (box.status === "ready" || box.status === "creating") {
     return "running";
   }
@@ -36,17 +38,49 @@ function containerState(box: PublicBox) {
 }
 
 export default async function HomePage() {
-  let boxes: PublicBox[] = [];
+  const configured = tryGetEnsureboxToken();
+  if ("error" in configured) {
+    return (
+      <Shell>
+        <Card>
+          <CardHeader>
+            <CardTitle>Operator console</CardTitle>
+            <CardDescription>{configured.error}</CardDescription>
+          </CardHeader>
+        </Card>
+      </Shell>
+    );
+  }
+
+  const authed = await isOperatorAuthed();
+  if (!authed) {
+    return (
+      <Shell>
+        <div className="space-y-4">
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight">Sign in</h1>
+            <p className="mt-1 max-w-2xl text-sm text-zinc-600">
+              This operator console can start and destroy Docker guests. Sign in
+              with <code className="rounded bg-zinc-100 px-1">ENSUREBOX_TOKEN</code>.
+            </p>
+          </div>
+          <LoginForm hint="Same token the /api/v1 Bearer header uses." />
+        </div>
+      </Shell>
+    );
+  }
+
+  let boxes: OperatorBox[] = [];
   let loadError: string | null = null;
   try {
-    boxes = await listPublicBoxes();
+    boxes = await listOperatorBoxes();
   } catch (err) {
     boxes = [];
     loadError = err instanceof Error ? err.message : String(err);
   }
 
   return (
-    <Shell>
+    <Shell authed>
       <div className="space-y-6">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Guests</h1>

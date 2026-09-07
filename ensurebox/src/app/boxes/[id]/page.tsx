@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { BoxLifecycleButtons } from "@/components/box-lifecycle-buttons";
+import { LoginForm } from "@/components/login-form";
 import { Shell } from "@/components/shell";
 import { Badge } from "@/components/ui/badge";
 import { buttonVariants } from "@/components/ui/button";
@@ -11,7 +12,9 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { getPublicBox } from "@/lib/lifecycle";
+import { isOperatorAuthed } from "@/lib/auth";
+import { tryGetEnsureboxToken } from "@/lib/config";
+import { getOperatorBox } from "@/lib/lifecycle";
 
 export const dynamic = "force-dynamic";
 
@@ -39,14 +42,35 @@ export default async function BoxPage({
 }: {
   params: Promise<{ id: string }>;
 }) {
+  const configured = tryGetEnsureboxToken();
+  if ("error" in configured) {
+    return (
+      <Shell>
+        <p className="text-sm text-destructive">{configured.error}</p>
+      </Shell>
+    );
+  }
+
+  const authed = await isOperatorAuthed();
+  if (!authed) {
+    return (
+      <Shell>
+        <div className="space-y-4">
+          <h1 className="text-2xl font-semibold tracking-tight">Sign in</h1>
+          <LoginForm />
+        </div>
+      </Shell>
+    );
+  }
+
   const { id } = await params;
-  const box = await getPublicBox(id);
+  const box = await getOperatorBox(id);
   if (!box) {
     notFound();
   }
 
   return (
-    <Shell>
+    <Shell authed>
       <div className="space-y-6">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div>
@@ -82,8 +106,8 @@ export default async function BoxPage({
           <CardHeader>
             <CardTitle>Container</CardTitle>
             <CardDescription>
-              Docker identity synced from inspect. The guest token stays on this
-              server.
+              Docker identity synced from inspect. The guest bearer token stays
+              on this server and is never sent to L1.
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -119,8 +143,8 @@ export default async function BoxPage({
           <CardHeader>
             <CardTitle>Ports</CardTitle>
             <CardDescription>
-              Published on this host. L1 must not call exec or host directly.
-              Operators may open the viewer.
+              Published on this host (loopback). L1 must not call exec or host
+              directly. noVNC on 6080 is not Bearer-authenticated.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-3 text-sm">
@@ -137,8 +161,19 @@ export default async function BoxPage({
                 label="viewer"
                 value={`${box.endpoints.viewer}  (:${box.ports.novnc} → 6080)`}
               />
-              <Field label="VNC password" value={box.vncPassword} />
+              <Field
+                label="VNC password"
+                value={
+                  box.vncPassword
+                    ? box.vncPassword
+                    : "not stored — destroy and recreate this guest"
+                }
+              />
             </dl>
+            <p className="text-xs text-zinc-500">
+              Independent of the guest bearer token. x11vnc uses at most 8
+              characters.
+            </p>
             <a
               className={buttonVariants({ variant: "outline" })}
               href={box.endpoints.viewer}
