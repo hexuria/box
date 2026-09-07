@@ -14,7 +14,7 @@ export type Capabilities = {
   cua: boolean;
 };
 
-/** Public box from EnsureBox. The guest bearer token is never included. */
+/** Public box from EnsureBox. Guest secrets and bind URLs are never included. */
 export type PublicBox = {
   id: string;
   name: string;
@@ -22,24 +22,9 @@ export type PublicBox = {
   image: string;
   containerName: string;
   containerId: string | null;
-  ports: {
-    exec: number;
-    host: number;
-    novnc: number;
-  };
-  volumes: {
-    workspace: string;
-    chromeProfile: string;
-  };
   createdAt: string;
   updatedAt: string;
   error: string | null;
-  endpoints: {
-    exec: string;
-    host: string;
-    viewer: string;
-  };
-  vncPassword: string;
 };
 
 export type EnsureboxHealth = {
