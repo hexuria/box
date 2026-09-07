@@ -33,9 +33,8 @@ impl BoxConfig {
     /// Load config from the environment, then drop bearer/VNC secrets from
     /// this process's environ so they are not visible in `/proc/self/environ`.
     pub fn from_env() -> Result<Self, ConfigError> {
-        let token = env_nonempty("BOX_TOKEN").ok_or_else(|| {
-            ConfigError("BOX_TOKEN must be set and non-empty".into())
-        })?;
+        let token = env_nonempty("BOX_TOKEN")
+            .ok_or_else(|| ConfigError("BOX_TOKEN must be set and non-empty".into()))?;
         let host_token = env_nonempty("BOX_HOST_TOKEN").unwrap_or_else(|| token.clone());
         let exec_bind = parse_addr("BOX_EXEC_BIND", "127.0.0.1:1337");
         let host_bind = parse_addr("BOX_HOST_BIND", "127.0.0.1:1340");
