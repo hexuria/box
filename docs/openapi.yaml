@@ -221,6 +221,45 @@ components:
       required: [ok]
       properties:
         ok: { type: boolean }
+    RecipeRequest:
+      type: object
+      required: [steps]
+      properties:
+        name: { type: string }
+        stop_on_error: { type: boolean, default: true }
+        screenshot: { type: string, enum: [none, end, each], default: end }
+        steps:
+          type: array
+          minItems: 1
+          maxItems: 64
+          items:
+            type: object
+            required: [op]
+            properties:
+              op:
+                type: string
+                enum: [click, double_click, double-click, move, drag, type, key, scroll, wait, screenshot]
+    RecipeResponse:
+      type: object
+      required: [ok, ran, duration_ms, steps]
+      properties:
+        ok: { type: boolean }
+        name: { type: string }
+        ran: { type: integer }
+        stopped_at: { type: integer, nullable: true }
+        duration_ms: { type: integer }
+        steps:
+          type: array
+          items:
+            type: object
+            required: [index, op, ok, ms]
+            properties:
+              index: { type: integer }
+              op: { type: string }
+              ok: { type: boolean }
+              ms: { type: integer }
+              error: { type: string }
+        screenshot: { $ref: "#/components/schemas/Screenshot" }
     Info:
       type: object
       required: [box_id, service, protocol, version, capabilities, endpoints, workspace]
@@ -703,6 +742,42 @@ paths:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
         "401":
           description: Missing or wrong token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /v1/cua/recipe:
+    post:
+      tags: [cua]
+      summary: Run many CUA steps in one request
+      description: |
+        Lint the whole plan, then actuate sequentially against DISPLAY=:1.
+        This is grok-box's recipe layer (one tool call, many pointer ops).
+        It is not a reverse-web-mcp compiler: the caller already wrote the steps.
+      security: [{ bearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RecipeRequest" }
+      responses:
+        "200":
+          description: Receipt (ok may be false if a step failed)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RecipeResponse" }
+        "400":
+          description: Empty plan, too many steps, or out of range — nothing ran
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401":
+          description: Missing or wrong token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "503":
+          description: CUA disabled or display down
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
