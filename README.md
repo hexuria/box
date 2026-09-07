@@ -1,58 +1,35 @@
 # grok-box
 
-**Grok Bot Layer 3 — sandboxed agent computer**
+A sandboxed Linux computer for agents: a guest Docker image, two HTTP daemons (`box-exec` and `box-host`), a `grok-box` CLI, and connect-only SDKs (Rust, TypeScript, Python).
 
-`grok-box` (also called askit-box) is the Linux box where an agent runs shell, reads and writes files, views a virtual desktop, drives Chromium, and performs Computer Use (CUA). It is a Cargo workspace plus one Docker image. It is not an inference server and not a control plane.
+You start the guest. Then you talk to it over HTTP with a URL pair and a bearer token. This repo does **not** publish packages to crates.io, npm, or PyPI.
 
 License: **MIT**. MSRV: Rust **1.85**.
 
-## What this repo is
+## What you get
 
-| Layer | Role | This repo? |
-| --- | --- | --- |
-| L1 | Client / desktop UI | **[`l1/`](l1/)** — human workspace (shell, files, desktop); talks only to EnsureBox; not in the guest image |
-| L2 | Server / control plane: tool router + **EnsureBox** lifecycle | **[`ensurebox/`](ensurebox/)** — operator console (Docker, ports, volumes) + HTTP API; not in the guest image |
-| **L3** | **Sandboxed Linux computer: `box-exec` + `box-host` + X desktop + Chrome + CUA** | **Yes (this image)** |
-| L4 | open-ai-gateway (model inference) | No |
+| Piece | Role |
+| --- | --- |
+| Guest image `grok-box` | Linux box: shell, files, 1280×800 X desktop, Chromium, Computer Use |
+| `box-exec` `:1337` | Exec, files (GET/PUT/DELETE/mkdir), CUA |
+| `box-host` `:1340` | Health, ready, identity, desktop/chrome status |
+| CLI `grok-box` | Same surface as the SDKs |
+| SDKs | Connect with `(execUrl, hostUrl, token)` — no `docker run` helper |
+| [`ensurebox/`](ensurebox/) | **Demo only** — sample orchestrator / operator UI (not a supported control plane) |
+| [`l1/`](l1/) | **Demo only** — sample human workspace UI (talks only to EnsureBox) |
 
-```
- L1 client  (./l1 — Win / Mac / Linux UI)
-    │  Bearer ENSUREBOX_TOKEN only
-    ▼
- L2 tool router ── EnsureBox (./ensurebox)
-    │  Bearer BOX_TOKEN (never sent to L1)
-    ▼
- L3 grok-box (this repo, Linux image)
-    ├── box-host :1340   identity, capabilities, ready, desktop/chrome status
-    ├── box-exec :1337   exec + files + /v1/cua/*
-    ├── Xvfb :1 1280×800 + openbox + x11vnc + noVNC :6080
-    └── Chromium (profile volume; CDP on localhost only)
-    │
-    ▼  (models stay elsewhere)
- L4 open-ai-gateway
-```
+Windows and macOS are clients or Docker hosts. The box OS is always this Linux image.
 
-This repository implements **our own wire**. It is not Cursor’s `/exec-daemon` or `sand-host`, does not clone those binaries, and does not reuse their package names as if they were official.
+This tree implements **our own HTTP wire**. It is not Cursor’s `/exec-daemon` or `sand-host`.
 
-Windows and macOS can **host Docker** or run the L1 client. They are not a native grok-box OS; the box itself is always this Linux image.
-
-## Quick start
+## Quick start (guest)
 
 ```bash
 cp .env.example .env          # optional; default token is dev-box-token
 docker compose up --build
 ```
 
-That single command starts exec, host, the virtual desktop, Chromium, and CUA tools.
-
-To use a box from the Layer 1 client (EnsureBox must be running):
-
-```bash
-cd ensurebox && npm install && npm run dev   # operator console + API, :43142
-cd l1 && npm install && npm run dev          # human client, :43141
-```
-
-Open L1 at [http://127.0.0.1:43141](http://127.0.0.1:43141) for shell, files, and desktop. Open L2 at [http://127.0.0.1:43142](http://127.0.0.1:43142) to inspect ports, volumes, and lifecycle.
+That builds the image and starts exec, host, Xvfb, Chromium, and CUA tools.
 
 Health (no token):
 
@@ -62,7 +39,7 @@ curl -fsS http://127.0.0.1:1340/v1/health
 curl -fsS http://127.0.0.1:1340/v1/ready
 ```
 
-Exec:
+Exec (token required):
 
 ```bash
 curl -fsS http://127.0.0.1:1337/v1/exec \
@@ -71,21 +48,45 @@ curl -fsS http://127.0.0.1:1337/v1/exec \
   -d '{"command":["echo","ok"]}'
 ```
 
-Screenshot (CUA; 1280×800 PNG as base64 JSON):
+Screenshot as JSON (base64 PNG) or raw `image/png`:
 
 ```bash
 curl -fsS http://127.0.0.1:1337/v1/cua/screenshot \
   -H "Authorization: Bearer dev-box-token" \
   -X POST
+
+curl -fsS http://127.0.0.1:1337/v1/cua/screenshot?format=png \
+  -H "Authorization: Bearer dev-box-token" \
+  -H "Accept: image/png" \
+  -X POST \
+  -o /tmp/box.png
 ```
 
-Desktop viewer: open [http://127.0.0.1:6080/vnc.html](http://127.0.0.1:6080/vnc.html). VNC password is the first **8 characters** of `BOX_TOKEN` (or `BOX_VNC_PASSWORD` if set). x11vnc itself listens on `127.0.0.1:5900` **inside** the container; Compose publishes only noVNC on **6080**.
+CUA coordinate space is **1280×800**, origin top-left.
 
-Full smoke (health, exec, files, 401, host info, screenshot, optional click):
+Desktop viewer: [http://127.0.0.1:6080/vnc.html](http://127.0.0.1:6080/vnc.html). VNC password is the first **8 characters** of `BOX_TOKEN` (or `BOX_VNC_PASSWORD`). x11vnc listens on `127.0.0.1:5900` **inside** the container; Compose publishes only noVNC on **6080**.
 
 ```bash
 ./scripts/smoke.sh
 ```
+
+### CLI and SDKs
+
+After the guest is up, any orchestrator (yours, or the EnsureBox demo) already has an exec URL, host URL, and token. Point the client at those. The SDKs **do not** start Docker and **ignore** `/v1/info` advertised URLs (those are container-local listen addresses).
+
+```bash
+cargo run -p grok-box -- \
+  --exec-url http://127.0.0.1:1337 \
+  --host-url http://127.0.0.1:1340 \
+  --token dev-box-token \
+  exec -- echo ok
+```
+
+Workspace packages (not published):
+
+- Rust: `crates/grok-box` (library + `grok-box` binary)
+- TypeScript: `sdk/typescript`
+- Python: `sdk/python`
 
 ### Native (no Docker, no X desktop)
 
@@ -98,10 +99,26 @@ cargo test --workspace
 
 Native mode sets `BOX_DESKTOP=0`. CUA screenshot needs the container (or a local Xvfb).
 
+## How an orchestrator should plug in
+
+1. Start a container from this image. Inject `BOX_TOKEN` and `BOX_ID`. Publish **1337 / 1340 / 6080** where you need them. Do **not** publish 5900 or 9222.
+2. Wait until `GET <hostUrl>/v1/ready` returns 200.
+3. Call `connect(execUrl, hostUrl, token)` in the CLI or an SDK. Do not parse `/v1/info.endpoints` as the public URLs.
+4. Drive `POST /v1/exec`, files, and `/v1/cua/*` yourself.
+
+[`ensurebox/`](ensurebox/) is a **demo** of that pattern. It is not a supported production control plane. [`l1/`](l1/) is a **demo** human UI that talks only to EnsureBox (`ENSUREBOX_TOKEN`). L1 never sees `BOX_TOKEN`, never SSHes, and never calls `box-exec` / `box-host`.
+
+Demo UIs (optional):
+
+```bash
+cd ensurebox && npm install && npm run dev   # operator console, :43142
+cd l1 && npm install && npm run dev          # human workspace, :43141
+```
+
 ## Ports
 
 | Port | Published? | Process | Notes |
-| --- | --- | --- | --- |
+| --- | --- | --- |
 | **1337** | yes | `box-exec` | exec, files, CUA. Bind `BOX_EXEC_BIND`. |
 | **1340** | yes | `box-host` | health, ready, info, desktop, chrome. Bind `BOX_HOST_BIND`. |
 | **6080** | yes | websockify / noVNC | Viewer. `http://127.0.0.1:6080/vnc.html` |
@@ -118,7 +135,8 @@ Native mode sets `BOX_DESKTOP=0`. CUA screenshot needs the container (or a local
 | `WORKSPACE_ROOT` | `/workspace` | Jail root for cwd and file APIs |
 | `BOX_EXEC_BIND` | `0.0.0.0:1337` | Exec listen address |
 | `BOX_HOST_BIND` | `0.0.0.0:1340` | Host listen address |
-| `BOX_EXEC_URL` | `http://127.0.0.1:1337` | URL host uses to probe exec |
+| `BOX_EXEC_URL` | `http://127.0.0.1:1337` | URL host uses to probe exec (container-local) |
+| `BOX_CORS_ORIGINS` | empty (no browser origins) | Comma-separated allowlist; `*` is ignored |
 | `BOX_DISPLAY` | `:1` | X display |
 | `BOX_DISPLAY_GEOM` | `1280x800x24` | Xvfb geometry; **CUA coordinate space is 1280×800** |
 | `BOX_DESKTOP` | `1` | Start Xvfb + openbox + x11vnc + noVNC |
@@ -133,35 +151,24 @@ Native mode sets `BOX_DESKTOP=0`. CUA screenshot needs the container (or a local
 
 ## Auth
 
-Send `Authorization: Bearer <token>`. Health and ready stay unauthenticated so L2 / Compose can probe them. The container **refuses to start** if `BOX_TOKEN` is missing. Local `cargo run` falls back to `dev-box-token`.
+Send `Authorization: Bearer <token>`. Health and ready stay unauthenticated so an orchestrator / Compose can probe them. The container **refuses to start** if `BOX_TOKEN` is missing. Local `cargo run` falls back to `dev-box-token`.
 
-## How L2 should plug in
+`BOX_TOKEN` is stripped from processes spawned by `/v1/exec`. Do not put it in L1 or any other untrusted client.
 
-1. **EnsureBox** (L2, not this image): create a container from `grok-box`, mount durable volumes at `/workspace` and `/home/box/chrome-profile`, inject `BOX_TOKEN` + `BOX_ID`, publish **1337 / 1340 / 6080** on an internal network. Do **not** publish 5900 or 9222.
-2. Wait until `GET http://<box>:1340/v1/ready` returns 200 (exec up, and desktop up when `BOX_DESKTOP_REQUIRED=1`).
-3. Discover features via `GET /v1/info`. In this image capabilities are `exec`, `files`, `desktop`, `chrome`, `cua`.
-4. Route agent tools to `box-exec`:
-   - shell → `POST /v1/exec`
-   - read/write → `GET` / `PUT /v1/files`
-   - computer use → `POST /v1/cua/screenshot|click|type|key|scroll`
-5. Humans (or L1) can attach to noVNC on 6080 with the VNC password.
-6. Send **inference** to L4 (open-ai-gateway). Do not point the model at `box-host`.
-
-See [l1/README.md](l1/README.md) for the Layer 1 client (shell, files, desktop; talks only to EnsureBox).
-
-See [ensurebox/README.md](ensurebox/README.md) for the Layer 2 control plane (operator console + HTTP API).
-
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/API.md](docs/API.md), and [docs/openapi.yaml](docs/openapi.yaml).
-
-## Crate layout
+## Layout
 
 ```
-crates/box-common    path jail, bearer compare, error envelope, config
+crates/box-common    path jail, bearer compare, error envelope, config, CORS
 crates/box-exec      exec + files + CUA HTTP daemon
 crates/box-host      identity / ready / capabilities / desktop + chrome status
 crates/box-desktop   Xvfb probe, 1280×800 geometry, viewer URL
 crates/box-chrome    Chromium profile + localhost CDP probe
-crates/box-cua       screenshot / click / type / key / scroll against X11
+crates/box-cua       screenshot / click / type / key / scroll / double-click / drag / move
+crates/grok-box      typed client + CLI (workspace only, not published)
+sdk/typescript       TypeScript client (workspace only)
+sdk/python           Python client (workspace only)
+ensurebox/           demo orchestrator (not production)
+l1/                  demo human UI (EnsureBox only)
 ```
 
 ## Volumes
@@ -171,10 +178,19 @@ crates/box-cua       screenshot / click / type / key / scroll against X11
 | `/workspace` | Jail root for cwd and file APIs. Persist across hibernate. |
 | `/home/box/chrome-profile` | Chromium `--user-data-dir`. Persist cookies/session. Must be writable by uid **1000**; otherwise the entrypoint falls back to `/tmp/box-chrome-profile`. |
 
+## Docs
+
+- [Architecture](docs/ARCHITECTURE.md)
+- [Startup](docs/STARTUP.md)
+- [Request processing](docs/PROCESSING.md)
+- [Terminology](docs/TERMINOLOGY.md)
+- [HTTP API](docs/API.md) · [OpenAPI](docs/openapi.yaml)
+
 ## What this is not
 
+- Not a supported production control plane (EnsureBox is a demo)
 - Not L4 / not an OpenAI-compatible inference gateway
-- Not L2 box orchestration (create/stop/hibernate)
 - Not a re-host of any proprietary exec/sand-host binary
-- Not a native Windows or macOS box OS (those are clients / Docker hosts)
-- Not a vendored [trycua/cua](https://github.com/trycua/cua) tree — Linux X11 is the default CUA backend; trycua is a later pluggable backend for macOS/Windows (see ARCHITECTURE)
+- Not a native Windows or macOS box OS
+- Not a vendored [trycua/cua](https://github.com/trycua/cua) tree — Linux X11 is the CUA backend
+- Not published to crates.io, npm, or PyPI

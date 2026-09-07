@@ -1,0 +1,24 @@
+# Terminology
+
+Names used in this repository. The public product name, the workspace crate, and the CLI binary are all **grok-box**.
+
+| Term | Meaning |
+| --- | --- |
+| **grok-box** | Guest image + `box-exec` / `box-host` + CLI + SDKs. Not published to crates.io / npm / PyPI. |
+| **guest** | The Linux container running this image. Always Linux; Windows/macOS are clients or Docker hosts. |
+| **box-exec** | HTTP daemon on 1337: exec, files, CUA. Our wire — not Cursor `/exec-daemon`. |
+| **box-host** | HTTP daemon on 1340: health, ready, info, desktop, chrome. Our wire — not `sand-host`. |
+| **BOX_TOKEN** | Bearer secret injected when the guest starts. Required in Docker. Stripped from exec children. Must never appear in L1. |
+| **ENSUREBOX_TOKEN** | Demo L2 API token. L1 holds this, not `BOX_TOKEN`. |
+| **connect-only SDK** | Caller passes `execUrl`, `hostUrl`, and `token`. No `docker run` / `Sandbox.create()`. |
+| **`/v1/info` endpoints** | Container-local listen URLs. Honest inventory, not the SDK connect source of truth. |
+| **workspace jail** | `WORKSPACE_ROOT` (default `/workspace`). cwd and file APIs cannot leave it. |
+| **CUA** | Computer Use against the X framebuffer. Coordinate space **1280×800**, origin **top-left**. |
+| **screenshot JSON** | `{ encoding, mime, width, height, bytes, png_base64 }` |
+| **screenshot PNG** | Raw `image/png` body when `Accept: image/png` or `?format=png` |
+| **EnsureBox (L2)** | **Demo** orchestrator: Docker lifecycle + HTTP proxy. Not a supported production control plane. |
+| **L1** | **Demo** human workspace UI. Talks only to EnsureBox `/api/v1`. |
+| **L3** | Informal name for the guest (this image). Prefer “grok-box guest”. |
+| **L4** | Inference gateway. Not this repository. Do not implement it here. |
+| **noVNC** | Browser viewer on 6080. Password = first 8 characters of `BOX_TOKEN` unless `BOX_VNC_PASSWORD` is set. |
+| **CDP** | Chromium DevTools on `127.0.0.1:9222` inside the guest. Never publish. |
