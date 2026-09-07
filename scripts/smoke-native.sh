@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "${ROOT}"
 
-TOKEN="${BOX_TOKEN:-dev-box-token}"
+TOKEN="${BOX_TOKEN:-local-smoke-box-token}"
 export BOX_TOKEN="${TOKEN}"
 export BOX_ID="${BOX_ID:-native-smoke}"
 export WORKSPACE_ROOT="${WORKSPACE_ROOT:-${ROOT}/workspace-data}"
@@ -17,6 +17,9 @@ export BOX_DESKTOP_REQUIRED="${BOX_DESKTOP_REQUIRED:-0}"
 export BOX_CHROME="${BOX_CHROME:-0}"
 export BOX_CUA="${BOX_CUA:-0}"
 export RUST_LOG="${RUST_LOG:-warn}"
+if [[ "${TOKEN}" == "dev-box-token" || ${#TOKEN} -lt 16 ]]; then
+  export BOX_ALLOW_INSECURE_DEV=1
+fi
 
 mkdir -p "${WORKSPACE_ROOT}"
 
@@ -63,6 +66,22 @@ code="$(curl -s -o /dev/null -w '%{http_code}' \
   -d '{"command":["true"]}' \
   http://127.0.0.1:1337/v1/exec)"
 [[ "${code}" == "401" ]]
+
+health="$(curl -fsS http://127.0.0.1:1337/v1/health)"
+echo "${health}" | grep -q '"status":"ok"'
+if echo "${health}" | grep -q '"service"'; then
+  echo "public health must not fingerprint the service" >&2
+  exit 1
+fi
+
+ready_unauth="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:1340/v1/ready)"
+if [[ "${ready_unauth}" != "401" ]]; then
+  echo "expected 401 for /v1/ready without token, got ${ready_unauth}" >&2
+  exit 1
+fi
+
+curl -fsS -H "Authorization: Bearer ${TOKEN}" http://127.0.0.1:1340/v1/ready \
+  | grep -q '"exec_ready":true'
 
 curl -fsS -H "Authorization: Bearer ${TOKEN}" http://127.0.0.1:1340/v1/info \
   | grep -q '"scope":"container-local"'
