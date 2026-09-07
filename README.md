@@ -10,8 +10,8 @@ License: **MIT**. MSRV: Rust **1.85**.
 
 | Layer | Role | This repo? |
 | --- | --- | --- |
-| L1 | Client / desktop UI | **Reference app in [`l1/`](l1/)** — talks only to EnsureBox; not in the guest image |
-| L2 | Server / control plane: tool router + **EnsureBox** lifecycle | **Reference app in [`ensurebox/`](ensurebox/)** — not in the guest image |
+| L1 | Client / desktop UI | **[`l1/`](l1/)** — human workspace (shell, files, desktop); talks only to EnsureBox; not in the guest image |
+| L2 | Server / control plane: tool router + **EnsureBox** lifecycle | **[`ensurebox/`](ensurebox/)** — operator console (Docker, ports, volumes) + HTTP API; not in the guest image |
 | **L3** | **Sandboxed Linux computer: `box-exec` + `box-host` + X desktop + Chrome + CUA** | **Yes (this image)** |
 | L4 | open-ai-gateway (model inference) | No |
 
@@ -45,12 +45,14 @@ docker compose up --build
 
 That single command starts exec, host, the virtual desktop, Chromium, and CUA tools.
 
-To use the Layer 1 client against EnsureBox instead of curling the guest:
+To use a box from the Layer 1 client (EnsureBox must be running):
 
 ```bash
-cd ensurebox && npm install && npm run dev   # http://127.0.0.1:43142
-cd l1 && npm install && npm run dev          # http://127.0.0.1:43141
+cd ensurebox && npm install && npm run dev   # operator console + API, :43142
+cd l1 && npm install && npm run dev          # human client, :43141
 ```
+
+Open L1 at [http://127.0.0.1:43141](http://127.0.0.1:43141) for shell, files, and desktop. Open L2 at [http://127.0.0.1:43142](http://127.0.0.1:43142) to inspect ports, volumes, and lifecycle.
 
 Health (no token):
 
@@ -145,9 +147,9 @@ Send `Authorization: Bearer <token>`. Health and ready stay unauthenticated so L
 5. Humans (or L1) can attach to noVNC on 6080 with the VNC password.
 6. Send **inference** to L4 (open-ai-gateway). Do not point the model at `box-host`.
 
-See [l1/README.md](l1/README.md) for the Layer 1 client (talks only to EnsureBox).
+See [l1/README.md](l1/README.md) for the Layer 1 client (shell, files, desktop; talks only to EnsureBox).
 
-See [ensurebox/README.md](ensurebox/README.md) for the Layer 2 control plane (create guest, wait ready, route tools).
+See [ensurebox/README.md](ensurebox/README.md) for the Layer 2 control plane (operator console + HTTP API).
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/API.md](docs/API.md), and [docs/openapi.yaml](docs/openapi.yaml).
 
