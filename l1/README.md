@@ -29,7 +29,7 @@ npm install
 npm run dev
 ```
 
-Open [http://127.0.0.1:43141](http://127.0.0.1:43141) and sign in with `L1_TOKEN`. Create a workspace, run a command, read/write a file, or take a screenshot. All of those requests go to EnsureBox at `http://127.0.0.1:43142`. The browser never receives `ENSUREBOX_TOKEN` or a guest token.
+Open [http://127.0.0.1:43141](http://127.0.0.1:43141) and sign in with `L1_TOKEN`. Create a workspace, then use **Desktop** to click/type on the framebuffer (Maximize for keyboard), or **Recipe** to run a JSON plan. Record on Desktop to fill Recipe. All of those requests go to EnsureBox at `http://127.0.0.1:43142`. The browser never receives `ENSUREBOX_TOKEN` or a guest token.
 
 ## What it does
 
@@ -43,9 +43,9 @@ Open [http://127.0.0.1:43141](http://127.0.0.1:43141) and sign in with `L1_TOKEN
 
 Auth: pages and server actions require `L1_TOKEN` (httpOnly cookie after login). The L1 server calls EnsureBox with `Authorization: Bearer <ENSUREBOX_TOKEN>`. That token belongs to the demo L2 API, not to a guest, and is never sent to the browser.
 
-Desktop is screenshots through EnsureBox CUA. L1 does not link guest noVNC ports or show a VNC password.
+Desktop is a live screenshot of the guest (click, type, scroll, drag, maximize). L1 does not link guest noVNC ports or show a VNC password. **Record to recipe** turns your session into Plan JSON.
 
-The Recipe tab runs a multi-step CUA plan as one HTTP call through EnsureBox (`POST /api/v1/boxes/:id/cua/recipe`). The browser never talks to the guest. The guest image must include that route: rebuild with `docker compose build` or EnsureBox create will start an old `grok-box:local` without `/v1/cua/recipe`.
+The Recipe tab lists every CUA op (`click`, `type`, `key`, `scroll`, `wait`, …). Edit Plan JSON and press Run — that string is what is sent. The guest image must include `/v1/cua/recipe`: rebuild with `docker compose build` or EnsureBox create will start an old `grok-box:local`.
 
 ## Environment
 
