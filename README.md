@@ -62,7 +62,7 @@ curl -fsS http://127.0.0.1:1337/v1/cua/screenshot?format=png \
   -o /tmp/box.png
 ```
 
-CUA coordinate space is **1280×800**, origin top-left.
+CUA coordinate space is **1280×800**, origin top-left. Known click/type/key sequences should go in **one** `POST /v1/cua/recipe` (see [RECIPES.md](docs/RECIPES.md)) instead of one HTTP call per action.
 
 Desktop viewer: [http://127.0.0.1:6080/vnc.html](http://127.0.0.1:6080/vnc.html) (loopback publish). Password is `BOX_VNC_PASSWORD` (x11vnc uses the first **8** characters). It is independent of `BOX_TOKEN`. 6080 is **not** Bearer-authenticated — firewall + loopback bind are the control. x11vnc listens on `127.0.0.1:5900` **inside** the container.
 
@@ -104,7 +104,7 @@ Native mode sets `BOX_DESKTOP=0`. CUA screenshot needs the container (or a local
 1. Start a container from this image. Inject `BOX_TOKEN`, `BOX_VNC_PASSWORD`, and `BOX_ID`. Publish **1337 / 1340 / 6080** on loopback (or behind a tunnel). Do **not** publish 5900 or 9222.
 2. Wait until `GET <hostUrl>/v1/ready` returns 200 **with Bearer**.
 3. Call `connect(execUrl, hostUrl, token)` in the CLI or an SDK. Do not parse `/v1/info.endpoints` as the public URLs.
-4. Drive `POST /v1/exec`, files, and `/v1/cua/*` yourself.
+4. Drive `POST /v1/exec`, files, `/v1/cua/*`, and `POST /v1/cua/recipe` yourself.
 
 [`ensurebox/`](ensurebox/) is a **demo** of that pattern. It is not a supported production control plane. [`l1/`](l1/) is a **demo** human UI that talks only to EnsureBox (`ENSUREBOX_TOKEN` server-side, `L1_TOKEN` for the browser session). L1 never sees `BOX_TOKEN`, never SSHes, and never calls `box-exec` / `box-host`.
 
@@ -166,7 +166,7 @@ crates/box-exec      exec + files + CUA HTTP daemon
 crates/box-host      identity / ready / capabilities / desktop + chrome status
 crates/box-desktop   Xvfb probe, 1280×800 geometry, viewer URL
 crates/box-chrome    Chromium profile + localhost CDP probe
-crates/box-cua       screenshot / click / type / key / scroll / double-click / drag / move
+crates/box-cua       screenshot / click / type / key / scroll / double-click / drag / move / recipe
 crates/grok-box      typed client + CLI (workspace only, not published)
 sdk/typescript       TypeScript client (workspace only)
 sdk/python           Python client (workspace only)
@@ -189,6 +189,7 @@ l1/                  demo human UI (EnsureBox only)
 - [Request processing](docs/PROCESSING.md)
 - [Terminology](docs/TERMINOLOGY.md)
 - [HTTP API](docs/API.md) · [OpenAPI](docs/openapi.yaml)
+- [CUA recipes](docs/RECIPES.md) — one request, many pointer steps (vs reverse-web-mcp)
 
 ## What this is not
 
