@@ -12,7 +12,7 @@ import type {
 
 /**
  * L1 talks only to EnsureBox (L2) over HTTP.
- * It never calls guest box-exec / box-host, never holds BOX_TOKEN, and never SSH.
+ * It never calls guest daemons, never holds the guest bearer token, and never SSH.
  */
 const API_PREFIX = "/api/v1/";
 
