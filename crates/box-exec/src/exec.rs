@@ -1,4 +1,5 @@
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::extract::State;
@@ -9,6 +10,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
 use crate::AppState;
+
+const STRIP_ENV: &[&str] = &["BOX_TOKEN", "BOX_HOST_TOKEN", "BOX_VNC_PASSWORD"];
 
 #[derive(Debug, Deserialize)]
 pub struct ExecRequest {
@@ -85,16 +88,7 @@ pub async fn handle(
         cmd.stdin(Stdio::null());
     }
 
-    if let Some(env) = &req.env {
-        for (key, value) in env {
-            if key.is_empty() || key.contains('=') || key.contains('\0') || value.contains('\0') {
-                return Err(ApiError::invalid_request(
-                    "invalid environment variable name or value",
-                ));
-            }
-            cmd.env(key, value);
-        }
-    }
+    apply_child_env(&mut cmd, req.env.as_ref())?;
 
     #[cfg(unix)]
     cmd.process_group(0);
@@ -113,89 +107,131 @@ pub async fn handle(
                 .write_all(data.as_bytes())
                 .await
                 .map_err(|err| ApiError::io(err.to_string()))?;
+            stdin
+                .shutdown()
+                .await
+                .map_err(|err| ApiError::io(err.to_string()))?;
         }
     }
 
-    let mut stdout = child
+    let stdout = child
         .stdout
         .take()
         .ok_or_else(|| ApiError::internal("missing stdout pipe"))?;
-    let mut stderr = child
+    let stderr = child
         .stderr
         .take()
         .ok_or_else(|| ApiError::internal("missing stderr pipe"))?;
 
     let max = state.max_output_bytes;
-    let collect = async {
-        let stdout_task = read_capped(&mut stdout, max);
-        let stderr_task = read_capped(&mut stderr, max);
-        let wait_task = child.wait();
-        tokio::try_join!(
-            async { Ok::<_, std::io::Error>(stdout_task.await) },
-            async { Ok::<_, std::io::Error>(stderr_task.await) },
-            wait_task
-        )
+    let stdout_buf = Arc::new(Mutex::new(Capped::default()));
+    let stderr_buf = Arc::new(Mutex::new(Capped::default()));
+    let stdout_task = {
+        let dest = stdout_buf.clone();
+        tokio::spawn(async move { fill_capped(stdout, dest, max).await })
+    };
+    let stderr_task = {
+        let dest = stderr_buf.clone();
+        tokio::spawn(async move { fill_capped(stderr, dest, max).await })
     };
 
-    let result = tokio::time::timeout(timeout, collect).await;
+    let wait_result = tokio::time::timeout(timeout, child.wait()).await;
     let duration_ms = started.elapsed().as_millis() as u64;
 
-    match result {
-        Ok(Ok((stdout, stderr, status))) => Ok(Json(ExecResponse {
-            truncated: stdout.truncated || stderr.truncated,
-            stdout: String::from_utf8_lossy(&stdout.bytes).into_owned(),
-            stderr: String::from_utf8_lossy(&stderr.bytes).into_owned(),
-            exit_code: status.code(),
-            timed_out: false,
-            duration_ms,
-            cwd: cwd.display().to_string(),
-        })),
-        Ok(Err(err)) => Err(ApiError::io(err.to_string())),
+    let (timed_out, exit_code) = match wait_result {
+        Ok(Ok(status)) => (false, status.code()),
+        Ok(Err(err)) => {
+            stdout_task.abort();
+            stderr_task.abort();
+            return Err(ApiError::io(err.to_string()));
+        }
         Err(_) => {
             kill_process_group(&mut child);
             let _ = child.start_kill();
             let _ = child.wait().await;
-            Ok(Json(ExecResponse {
-                stdout: String::new(),
-                stderr: String::new(),
-                exit_code: None,
-                timed_out: true,
-                duration_ms,
-                truncated: false,
-                cwd: cwd.display().to_string(),
-            }))
+            (true, None)
         }
-    }
+    };
+
+    let drain = async {
+        let _ = stdout_task.await;
+        let _ = stderr_task.await;
+    };
+    let _ = tokio::time::timeout(Duration::from_secs(2), drain).await;
+
+    let stdout = stdout_buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let stderr = stderr_buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
+
+    Ok(Json(ExecResponse {
+        truncated: stdout.truncated || stderr.truncated,
+        stdout: String::from_utf8_lossy(&stdout.bytes).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr.bytes).into_owned(),
+        exit_code,
+        timed_out,
+        duration_ms,
+        cwd: cwd.display().to_string(),
+    }))
 }
 
+fn apply_child_env(
+    cmd: &mut Command,
+    extra: Option<&std::collections::HashMap<String, String>>,
+) -> Result<(), ApiError> {
+    for key in STRIP_ENV {
+        cmd.env_remove(key);
+    }
+    if let Some(env) = extra {
+        for (key, value) in env {
+            if key.is_empty() || key.contains('=') || key.contains('\0') || value.contains('\0') {
+                return Err(ApiError::invalid_request(
+                    "invalid environment variable name or value",
+                ));
+            }
+            if is_secret_key(key) {
+                continue;
+            }
+            cmd.env(key, value);
+        }
+    }
+    for key in STRIP_ENV {
+        cmd.env_remove(key);
+    }
+    Ok(())
+}
+
+fn is_secret_key(key: &str) -> bool {
+    STRIP_ENV
+        .iter()
+        .any(|secret| secret.eq_ignore_ascii_case(key))
+}
+
+#[derive(Clone, Default)]
 struct Capped {
     bytes: Vec<u8>,
     truncated: bool,
 }
 
-async fn read_capped<R: AsyncReadExt + Unpin>(reader: &mut R, max: usize) -> Capped {
-    let mut bytes = Vec::new();
+async fn fill_capped<R: AsyncReadExt + Unpin>(mut reader: R, dest: Arc<Mutex<Capped>>, max: usize) {
     let mut buf = [0u8; 8192];
-    let mut truncated = false;
     loop {
         match reader.read(&mut buf).await {
             Ok(0) => break,
             Ok(n) => {
-                if bytes.len() >= max {
-                    truncated = true;
+                let mut cap = dest.lock().unwrap_or_else(|e| e.into_inner());
+                if cap.bytes.len() >= max {
+                    cap.truncated = true;
                     continue;
                 }
-                let room = max.saturating_sub(bytes.len());
+                let room = max.saturating_sub(cap.bytes.len());
                 let take = n.min(room);
-                bytes.extend_from_slice(&buf[..take]);
+                cap.bytes.extend_from_slice(&buf[..take]);
                 if take < n {
-                    truncated = true;
+                    cap.truncated = true;
                 }
             }
             Err(_) => break,
         }
     }
-    Capped { bytes, truncated }
 }
 
 fn clamp_timeout(state: &AppState, requested: Option<u64>) -> Duration {
@@ -242,5 +278,14 @@ mod tests {
             Duration::from_secs(60)
         );
         assert_eq!(clamp_timeout(&state, Some(0)), Duration::from_millis(1));
+    }
+
+    #[test]
+    fn secret_keys_are_detected() {
+        assert!(is_secret_key("BOX_TOKEN"));
+        assert!(is_secret_key("box_token"));
+        assert!(is_secret_key("BOX_HOST_TOKEN"));
+        assert!(is_secret_key("BOX_VNC_PASSWORD"));
+        assert!(!is_secret_key("PATH"));
     }
 }
