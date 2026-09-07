@@ -8,9 +8,9 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use box_common::ApiError;
 use box_cua::{
-    click, double_click, drag, key, move_pointer, screenshot, screenshot_png, scroll, type_text,
-    ClickRequest, CuaError, DragRequest, KeyRequest, MoveRequest, OkResponse, ScrollRequest,
-    TypeRequest,
+    click, double_click, drag, key, move_pointer, run_recipe, screenshot, screenshot_png, scroll,
+    type_text, ClickRequest, CuaError, DragRequest, KeyRequest, MoveRequest, OkResponse,
+    RecipeRequest, RecipeResponse, ScrollRequest, TypeRequest,
 };
 use serde::Deserialize;
 
@@ -129,6 +129,16 @@ pub async fn scroll_handler(
     Json(req): Json<ScrollRequest>,
 ) -> Result<Json<OkResponse>, ApiError> {
     scroll(&state.cua, &req).await.map(Json).map_err(map_err)
+}
+
+pub async fn recipe_handler(
+    State(state): State<AppState>,
+    Json(req): Json<RecipeRequest>,
+) -> Result<Json<RecipeResponse>, ApiError> {
+    run_recipe(&state.cua, &req)
+        .await
+        .map(Json)
+        .map_err(map_err)
 }
 
 #[cfg(test)]
