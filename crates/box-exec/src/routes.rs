@@ -1,4 +1,3 @@
-use axum::extract::State;
 use axum::middleware;
 use axum::routing::{get, post};
 use axum::Json;
@@ -11,8 +10,6 @@ use crate::{cua, exec, files, AppState};
 #[derive(Serialize)]
 struct HealthResponse {
     status: &'static str,
-    service: &'static str,
-    version: &'static str,
 }
 
 pub fn app(state: AppState) -> Router {
@@ -39,10 +36,6 @@ pub fn app(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn health(State(_state): State<AppState>) -> Json<HealthResponse> {
-    Json(HealthResponse {
-        status: "ok",
-        service: "box-exec",
-        version: env!("CARGO_PKG_VERSION"),
-    })
+async fn health() -> Json<HealthResponse> {
+    Json(HealthResponse { status: "ok" })
 }

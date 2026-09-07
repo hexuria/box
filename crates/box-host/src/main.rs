@@ -15,7 +15,13 @@ fn init_tracing() {
 #[tokio::main]
 async fn main() {
     init_tracing();
-    let config = BoxConfig::from_env();
+    let config = match BoxConfig::from_env() {
+        Ok(config) => config,
+        Err(err) => {
+            tracing::error!(error = %err, "invalid configuration");
+            std::process::exit(1);
+        }
+    };
     if let Err(err) = serve(config).await {
         tracing::error!(error = %err, "box-host exited");
         std::process::exit(1);
