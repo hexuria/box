@@ -181,11 +181,11 @@ pub async fn click(config: &CuaConfig, req: &ClickRequest) -> Result<OkResponse,
     if !(1..=7).contains(&button) {
         return Err(CuaError::Invalid("button must be 1-7".into()));
     }
+    // No mousemove --sync: Xvfb can block ~15s per click with it.
     xdotool(
         config,
         &[
             "mousemove",
-            "--sync",
             &req.x.to_string(),
             &req.y.to_string(),
             "click",
@@ -244,7 +244,6 @@ pub async fn scroll(config: &CuaConfig, req: &ScrollRequest) -> Result<OkRespons
 
     let mut args = vec![
         "mousemove".into(),
-        "--sync".into(),
         req.x.to_string(),
         req.y.to_string(),
     ];
@@ -283,7 +282,6 @@ pub async fn double_click(config: &CuaConfig, req: &ClickRequest) -> Result<OkRe
         config,
         &[
             "mousemove",
-            "--sync",
             &req.x.to_string(),
             &req.y.to_string(),
             "click",
@@ -305,7 +303,6 @@ pub async fn move_pointer(config: &CuaConfig, req: &MoveRequest) -> Result<OkRes
         config,
         &[
             "mousemove",
-            "--sync",
             &req.x.to_string(),
             &req.y.to_string(),
         ],
@@ -326,13 +323,11 @@ pub async fn drag(config: &CuaConfig, req: &DragRequest) -> Result<OkResponse, C
         config,
         &[
             "mousemove",
-            "--sync",
             &req.x1.to_string(),
             &req.y1.to_string(),
             "mousedown",
             &button.to_string(),
             "mousemove",
-            "--sync",
             &req.x2.to_string(),
             &req.y2.to_string(),
             "mouseup",
