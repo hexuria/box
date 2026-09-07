@@ -6,6 +6,13 @@ if [[ -z "${BOX_TOKEN:-}" ]]; then
   exit 1
 fi
 
+# Copy secrets out of the shell environment so this long-lived entrypoint
+# (and later children such as Chromium) do not keep them in environ.
+BOX_TOKEN_VALUE="${BOX_TOKEN}"
+BOX_HOST_TOKEN_VALUE="${BOX_HOST_TOKEN:-${BOX_TOKEN}}"
+BOX_VNC_PASSWORD_VALUE="${BOX_VNC_PASSWORD:-}"
+unset BOX_TOKEN BOX_HOST_TOKEN BOX_VNC_PASSWORD || true
+
 export WORKSPACE_ROOT="${WORKSPACE_ROOT:-/workspace}"
 export BOX_DESKTOP="${BOX_DESKTOP:-1}"
 export BOX_DISPLAY="${BOX_DISPLAY:-:1}"
@@ -17,6 +24,10 @@ export BOX_CHROME="${BOX_CHROME:-1}"
 export BOX_CHROME_PROFILE="${BOX_CHROME_PROFILE:-${HOME:-/home/box}/chrome-profile}"
 export BOX_CDP_PORT="${BOX_CDP_PORT:-9222}"
 export BOX_CUA="${BOX_CUA:-1}"
+# Listen on all interfaces *inside* the container netns so Compose port-map
+# works. Host publish is 127.0.0.1 (see docker-compose.yml).
+export BOX_EXEC_BIND="${BOX_EXEC_BIND:-0.0.0.0:1337}"
+export BOX_HOST_BIND="${BOX_HOST_BIND:-0.0.0.0:1340}"
 
 mkdir -p "${WORKSPACE_ROOT}" "${BOX_CHROME_PROFILE}"
 
@@ -71,6 +82,11 @@ start_desktop() {
   dnum="$(display_num)"
   xvfb_screen="${BOX_DISPLAY_GEOM}"
 
+  if [[ -z "${BOX_VNC_PASSWORD_VALUE}" ]]; then
+    echo "BOX_VNC_PASSWORD must be set when BOX_DESKTOP=1 (independent of BOX_TOKEN; x11vnc uses the first 8 characters)" >&2
+    exit 1
+  fi
+
   echo "starting Xvfb ${BOX_DISPLAY} ${xvfb_screen}"
   Xvfb "${BOX_DISPLAY}" -screen 0 "${xvfb_screen}" -ac +extension GLX +render -noreset &
   record $!
@@ -96,10 +112,10 @@ start_desktop() {
 
   mkdir -p "${HOME:-/home/box}/.vnc"
   passfile="${HOME:-/home/box}/.vnc/passwd"
-  vnc_pass="${BOX_VNC_PASSWORD:-${BOX_TOKEN}}"
-  vnc_pass="${vnc_pass:0:8}"
+  vnc_pass="${BOX_VNC_PASSWORD_VALUE:0:8}"
   x11vnc -storepasswd "${vnc_pass}" "${passfile}" >/dev/null
   chmod 600 "${passfile}"
+  vnc_pass=""
 
   echo "starting x11vnc on ${BOX_VNC_BIND} (localhost only)"
   x11vnc \
@@ -118,7 +134,9 @@ start_desktop() {
     exit 1
   fi
 
-  echo "starting noVNC/websockify on 0.0.0.0:${BOX_NOVNC_PORT}"
+  # 0.0.0.0 *inside* the container so Docker port-map to the veth IP works.
+  # Host publish is 127.0.0.1:6080. 6080 is not Bearer-authenticated.
+  echo "starting noVNC/websockify on 0.0.0.0:${BOX_NOVNC_PORT} (host publish should be loopback)"
   websockify --web="${BOX_NOVNC_WEB}" "0.0.0.0:${BOX_NOVNC_PORT}" "${BOX_VNC_BIND}" \
     >/tmp/websockify.log 2>&1 &
   record $!
@@ -182,11 +200,16 @@ if flag_on "${BOX_DESKTOP}"; then
   fi
 fi
 
-box-exec &
+# Pass bearer secrets only to the daemons; they wipe their own environ after load.
+env BOX_TOKEN="${BOX_TOKEN_VALUE}" BOX_HOST_TOKEN="${BOX_HOST_TOKEN_VALUE}" box-exec &
+record $!
+env BOX_TOKEN="${BOX_TOKEN_VALUE}" BOX_HOST_TOKEN="${BOX_HOST_TOKEN_VALUE}" box-host &
 record $!
 
-box-host &
-record $!
+BOX_TOKEN_VALUE=""
+BOX_HOST_TOKEN_VALUE=""
+BOX_VNC_PASSWORD_VALUE=""
+unset BOX_TOKEN_VALUE BOX_HOST_TOKEN_VALUE BOX_VNC_PASSWORD_VALUE || true
 
 while true; do
   for pid in "${PIDS[@]}"; do
