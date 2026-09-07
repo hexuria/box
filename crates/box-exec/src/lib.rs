@@ -13,10 +13,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use axum::Router;
-use box_common::BoxConfig;
+use box_common::{cors_layer, BoxConfig};
 use box_cua::CuaConfig;
 use tokio::net::TcpListener;
-use tower_http::cors::CorsLayer;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 
@@ -55,7 +54,7 @@ pub fn router(state: AppState) -> Router {
     app(state)
         .layer(RequestBodyLimitLayer::new(body_limit))
         .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive())
+        .layer(cors_layer())
 }
 
 pub async fn serve(config: BoxConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

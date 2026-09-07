@@ -28,7 +28,7 @@ services:
       - ./workspace-data:/workspace
       - ./chrome-profile:/home/box/chrome-profile
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:1340/v1/health"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:1340/v1/ready"]
       interval: 5s
       timeout: 3s
       retries: 12

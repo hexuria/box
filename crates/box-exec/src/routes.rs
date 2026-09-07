@@ -18,9 +18,16 @@ struct HealthResponse {
 pub fn app(state: AppState) -> Router {
     let protected = Router::new()
         .route("/v1/exec", post(exec::handle))
-        .route("/v1/files", get(files::get).put(files::put))
+        .route(
+            "/v1/files",
+            get(files::get).put(files::put).delete(files::delete),
+        )
+        .route("/v1/files/mkdir", post(files::mkdir))
         .route("/v1/cua/screenshot", post(cua::screenshot_handler))
         .route("/v1/cua/click", post(cua::click_handler))
+        .route("/v1/cua/double-click", post(cua::double_click_handler))
+        .route("/v1/cua/move", post(cua::move_handler))
+        .route("/v1/cua/drag", post(cua::drag_handler))
         .route("/v1/cua/type", post(cua::type_handler))
         .route("/v1/cua/key", post(cua::key_handler))
         .route("/v1/cua/scroll", post(cua::scroll_handler))
