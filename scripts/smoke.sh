@@ -5,8 +5,13 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "${ROOT}"
 
-TOKEN="${BOX_TOKEN:-dev-box-token}"
+TOKEN="${BOX_TOKEN:-local-smoke-box-token}"
+if [[ "${TOKEN}" == "dev-box-token" || ${#TOKEN} -lt 16 ]]; then
+  echo "refusing insecure BOX_TOKEN for Compose (in-container binds are 0.0.0.0); using local-smoke-box-token" >&2
+  TOKEN="local-smoke-box-token"
+fi
 export BOX_TOKEN="${TOKEN}"
+export BOX_VNC_PASSWORD="${BOX_VNC_PASSWORD:-smokevnc}"
 EXEC_URL="${EXEC_URL:-http://127.0.0.1:1337}"
 HOST_URL="${HOST_URL:-http://127.0.0.1:1340}"
 
@@ -52,7 +57,7 @@ ok=0
 for _ in $(seq 1 90); do
   if curl -fsS "${EXEC_URL}/v1/health" >/dev/null 2>&1 \
     && curl -fsS "${HOST_URL}/v1/health" >/dev/null 2>&1 \
-    && curl -fsS "${HOST_URL}/v1/ready" >/dev/null 2>&1; then
+    && curl -fsS -H "Authorization: Bearer ${TOKEN}" "${HOST_URL}/v1/ready" >/dev/null 2>&1; then
     ok=1
     break
   fi
@@ -64,8 +69,21 @@ if [[ "${ok}" != "1" ]]; then
   exit 1
 fi
 
-echo "==> GET /v1/health (exec)"
-curl -fsS "${EXEC_URL}/v1/health" | grep -q '"status":"ok"'
+echo "==> GET /v1/health (exec, public, minimal)"
+health="$(curl -fsS "${EXEC_URL}/v1/health")"
+echo "${health}"
+echo "${health}" | grep -q '"status":"ok"'
+if echo "${health}" | grep -q '"service"'; then
+  echo "public health must not fingerprint the service" >&2
+  exit 1
+fi
+
+echo "==> GET /v1/ready requires bearer"
+ready_unauth="$(curl -s -o /dev/null -w '%{http_code}' "${HOST_URL}/v1/ready")"
+if [[ "${ready_unauth}" != "401" ]]; then
+  echo "expected 401 for /v1/ready without token, got ${ready_unauth}" >&2
+  exit 1
+fi
 
 echo "==> POST /v1/exec echo ok"
 out="$(curl -fsS \
@@ -152,7 +170,7 @@ echo "${chrome}" | grep -q '"enabled":true'
 echo "${chrome}" | grep -q '"cdp":"127.0.0.1:9222"'
 
 echo "==> GET /v1/ready (host)"
-ready="$(curl -fsS "${HOST_URL}/v1/ready")"
+ready="$(curl -fsS -H "Authorization: Bearer ${TOKEN}" "${HOST_URL}/v1/ready")"
 echo "${ready}"
 echo "${ready}" | grep -q '"exec_ready":true'
 echo "${ready}" | grep -q '"desktop_ready":true'
@@ -244,9 +262,9 @@ echo "${drag}" | grep -q '"ok":true'
 echo "==> BOX_DESKTOP=0 still serves exec+host"
 "${COMPOSE[@]}" down --remove-orphans >/dev/null 2>&1 || true
 if [[ "${COMPOSE[0]}" == "sudo" ]]; then
-  sudo -n env BOX_DESKTOP=0 BOX_DESKTOP_REQUIRED=0 BOX_TOKEN="${TOKEN}" docker compose up -d --force-recreate
+  sudo -n env BOX_DESKTOP=0 BOX_DESKTOP_REQUIRED=0 BOX_TOKEN="${TOKEN}" BOX_VNC_PASSWORD="${BOX_VNC_PASSWORD}" docker compose up -d --force-recreate
 else
-  BOX_DESKTOP=0 BOX_DESKTOP_REQUIRED=0 "${COMPOSE[@]}" up -d --force-recreate
+  BOX_DESKTOP=0 BOX_DESKTOP_REQUIRED=0 BOX_TOKEN="${TOKEN}" BOX_VNC_PASSWORD="${BOX_VNC_PASSWORD}" "${COMPOSE[@]}" up -d --force-recreate
 fi
 ok=0
 for _ in $(seq 1 90); do
@@ -267,7 +285,7 @@ echo "${off_info}"
 echo "${off_info}" | grep -q '"desktop":false'
 echo "${off_info}" | grep -q '"chrome":false'
 echo "${off_info}" | grep -q '"cua":false'
-curl -fsS "${HOST_URL}/v1/ready" | grep -q '"exec_ready":true'
+curl -fsS -H "Authorization: Bearer ${TOKEN}" "${HOST_URL}/v1/ready" | grep -q '"exec_ready":true'
 off_exec="$(curl -fsS \
   -H "Authorization: Bearer ${TOKEN}" \
   -H "Content-Type: application/json" \
