@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BASE="${L1_URL:-http://127.0.0.1:43141}"
 
 echo "== L1 source must not talk to the guest =="
-if grep -RInE 'process\.env\.BOX_TOKEN|127\.0\.0\.1:1337|127\.0\.0\.1:1340|BOX_EXEC_URL' "$ROOT/src"; then
+if grep -RInE '\<BOX_TOKEN\>|127\.0\.0\.1:1337|127\.0\.0\.1:1340|BOX_EXEC_URL|box-exec|box-host' "$ROOT/src"; then
   echo "L1 source must not call the guest or hold BOX_TOKEN" >&2
   exit 1
 fi

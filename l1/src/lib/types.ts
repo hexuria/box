@@ -14,7 +14,7 @@ export type Capabilities = {
   cua: boolean;
 };
 
-/** Public box from EnsureBox. Guest BOX_TOKEN is never included. */
+/** Public box from EnsureBox. The guest bearer token is never included. */
 export type PublicBox = {
   id: string;
   name: string;
