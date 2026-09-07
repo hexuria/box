@@ -178,6 +178,7 @@ dependencies = [
  "base64",
  "box-desktop",
  "serde",
+ "serde_json",
  "thiserror",
  "tokio",
 ]
