@@ -12,17 +12,17 @@ export function CreateBoxForm({ disabled }: { disabled: boolean }) {
   return (
     <form action={action} className="flex flex-col gap-3 sm:flex-row sm:items-end">
       <div className="flex-1 space-y-1.5">
-        <Label htmlFor="name">Box name</Label>
+        <Label htmlFor="name">Name</Label>
         <Input
           id="name"
           name="name"
-          placeholder="optional, e.g. agent-1"
+          placeholder="optional, e.g. notes"
           autoComplete="off"
           disabled={disabled || pending}
         />
       </div>
       <Button type="submit" disabled={disabled || pending} className="sm:w-44">
-        {pending ? "Creating via EnsureBox…" : "Create box"}
+        {pending ? "Opening…" : "New workspace"}
       </Button>
       {state?.error ? (
         <p className="text-sm text-destructive sm:self-center">{state.error}</p>

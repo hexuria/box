@@ -40,28 +40,10 @@ export async function createBoxAction(
   }
 }
 
-export async function stopBoxAction(id: string) {
-  await ensurebox.stopBox(id);
-  revalidatePath("/");
-  revalidatePath(`/boxes/${id}`);
-}
-
-export async function hibernateBoxAction(id: string) {
-  await ensurebox.hibernateBox(id);
-  revalidatePath("/");
-  revalidatePath(`/boxes/${id}`);
-}
-
 export async function startBoxAction(id: string) {
   await ensurebox.startBox(id);
   revalidatePath("/");
   revalidatePath(`/boxes/${id}`);
-}
-
-export async function destroyBoxAction(id: string) {
-  await ensurebox.destroyBox(id);
-  revalidatePath("/");
-  redirect("/");
 }
 
 export async function execAction(

@@ -8,11 +8,11 @@ export function Shell({ children }: { children: React.ReactNode }) {
           <Link href="/" className="font-semibold tracking-tight">
             Grok Box
             <span className="ml-2 text-sm font-normal text-zinc-500">
-              Layer 1 client
+              Client
             </span>
           </Link>
           <p className="text-sm text-zinc-500">
-            Talks only to EnsureBox. Never holds a guest token.
+            Shell, files, and desktop. Use a box — do not operate Docker here.
           </p>
         </div>
       </header>
