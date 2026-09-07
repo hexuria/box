@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { ConnectionBanner } from "@/components/connection-banner";
 import { CreateBoxForm } from "@/components/create-box-form";
+import { LoginForm } from "@/components/login-form";
 import { Shell } from "@/components/shell";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -10,6 +11,8 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { isL1Authed } from "@/lib/auth";
+import { tryGetL1Token } from "@/lib/config";
 import { connectionStatus, EnsureboxError, listBoxes } from "@/lib/ensurebox";
 import type { PublicBox } from "@/lib/types";
 
@@ -40,6 +43,38 @@ function statusVariant(status: string) {
 }
 
 export default async function HomePage() {
+  const configured = tryGetL1Token();
+  if ("error" in configured) {
+    return (
+      <Shell>
+        <Card>
+          <CardHeader>
+            <CardTitle>Client is not configured</CardTitle>
+            <CardDescription>{configured.error}</CardDescription>
+          </CardHeader>
+        </Card>
+      </Shell>
+    );
+  }
+
+  const authed = await isL1Authed();
+  if (!authed) {
+    return (
+      <Shell>
+        <div className="space-y-4">
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight">Sign in</h1>
+            <p className="mt-1 max-w-2xl text-sm text-zinc-600">
+              This client talks only to EnsureBox. Sign in with the L1 token.
+              Guest credentials never reach the browser.
+            </p>
+          </div>
+          <LoginForm hint="Set L1_TOKEN in l1/.env. This is not the guest bearer." />
+        </div>
+      </Shell>
+    );
+  }
+
   const status = await connectionStatus();
   let boxes: PublicBox[] = [];
   let loadError: string | null = null;
@@ -59,13 +94,13 @@ export default async function HomePage() {
   const createDisabled = !status.reachable || status.authorized !== true;
 
   return (
-    <Shell>
+    <Shell authed>
       <div className="space-y-6">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Workspaces</h1>
           <p className="mt-1 max-w-2xl text-sm text-zinc-600">
             Open a box to run a shell, read and write files, and use the
-            desktop. Guest tokens never reach this client.
+            desktop via screenshots. Guest tokens never reach this client.
           </p>
         </div>
 

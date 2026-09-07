@@ -2,10 +2,12 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { AutoRefresh } from "@/components/auto-refresh";
 import { BoxTools } from "@/components/box-tools";
+import { LoginForm } from "@/components/login-form";
 import { Shell } from "@/components/shell";
 import { WakeButton } from "@/components/wake-button";
 import { Badge } from "@/components/ui/badge";
-import { buttonVariants } from "@/components/ui/button";
+import { isL1Authed } from "@/lib/auth";
+import { tryGetL1Token } from "@/lib/config";
 import { EnsureboxError, getBox } from "@/lib/ensurebox";
 
 export const dynamic = "force-dynamic";
@@ -29,6 +31,27 @@ export default async function BoxPage({
 }: {
   params: Promise<{ id: string }>;
 }) {
+  const configured = tryGetL1Token();
+  if ("error" in configured) {
+    return (
+      <Shell>
+        <p className="text-sm text-destructive">{configured.error}</p>
+      </Shell>
+    );
+  }
+
+  const authed = await isL1Authed();
+  if (!authed) {
+    return (
+      <Shell>
+        <div className="space-y-4">
+          <h1 className="text-2xl font-semibold tracking-tight">Sign in</h1>
+          <LoginForm />
+        </div>
+      </Shell>
+    );
+  }
+
   const { id } = await params;
   let box;
   try {
@@ -48,7 +71,7 @@ export default async function BoxPage({
     box.status === "error";
 
   return (
-    <Shell>
+    <Shell authed>
       <AutoRefresh when={waiting} />
       <div className="space-y-6">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -61,16 +84,6 @@ export default async function BoxPage({
           <div className="flex flex-wrap items-center gap-2">
             <Badge>{humanStatus(box.status)}</Badge>
             <WakeButton id={box.id} status={box.status} />
-            {!asleep ? (
-              <a
-                className={buttonVariants({ variant: "outline" })}
-                href={box.endpoints.viewer}
-                target="_blank"
-                rel="noreferrer"
-              >
-                Open live desktop
-              </a>
-            ) : null}
           </div>
         </div>
 
@@ -95,8 +108,8 @@ export default async function BoxPage({
 
         {!asleep ? (
           <p className="text-sm text-zinc-600">
-            Live desktop password{" "}
-            <span className="font-mono">{box.vncPassword}</span>
+            Desktop is the screenshot tab (1280×800, top-left origin). This
+            client does not open guest viewer ports.
           </p>
         ) : null}
 

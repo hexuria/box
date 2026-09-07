@@ -1,4 +1,4 @@
-import { ENSUREBOX_TOKEN, ENSUREBOX_URL } from "./config";
+import { ENSUREBOX_URL, getEnsureboxToken } from "./config";
 import type {
   Capabilities,
   EnsureboxErrorBody,
@@ -63,7 +63,7 @@ async function request<T>(
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const headers = new Headers(init.headers);
   if (!headers.has("authorization")) {
-    headers.set("authorization", `Bearer ${ENSUREBOX_TOKEN}`);
+    headers.set("authorization", `Bearer ${getEnsureboxToken()}`);
   }
   if (init.body && !headers.has("content-type")) {
     headers.set("content-type", "application/json");
@@ -242,6 +242,17 @@ export type ConnectionStatus = {
 };
 
 export async function connectionStatus(): Promise<ConnectionStatus> {
+  try {
+    getEnsureboxToken();
+  } catch (err) {
+    return {
+      url: ENSUREBOX_URL,
+      reachable: false,
+      authorized: null,
+      protocol: null,
+      message: err instanceof Error ? err.message : String(err),
+    };
+  }
   try {
     const health = await pingHealth();
     try {
