@@ -6,8 +6,8 @@ import { BIND_HOST, DATA_DIR, GROK_BOX_IMAGE, READY_TIMEOUT_MS } from "./config"
 import { containerInspect, docker, imageExists } from "./docker";
 import { allocatePorts } from "./ports";
 import { getBox, listBoxes, removeBox, upsertBox } from "./store";
-import type { BoxRecord, Capabilities, PublicBox } from "./types";
-import { toPublicBox } from "./store";
+import type { BoxRecord, Capabilities, OperatorBox, PublicBox } from "./types";
+import { toOperatorBox, toPublicBox } from "./store";
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -59,12 +59,26 @@ export async function listPublicBoxes(): Promise<PublicBox[]> {
   return synced.map(toPublicBox);
 }
 
+export async function listOperatorBoxes(): Promise<OperatorBox[]> {
+  const boxes = await listBoxes();
+  const synced = await Promise.all(boxes.map((box) => syncStatus(box)));
+  return synced.map(toOperatorBox);
+}
+
 export async function getPublicBox(id: string): Promise<PublicBox | null> {
   const box = await getBox(id);
   if (!box) {
     return null;
   }
   return toPublicBox(await syncStatus(box));
+}
+
+export async function getOperatorBox(id: string): Promise<OperatorBox | null> {
+  const box = await getBox(id);
+  if (!box) {
+    return null;
+  }
+  return toOperatorBox(await syncStatus(box));
 }
 
 export async function requireBox(id: string): Promise<BoxRecord> {
@@ -84,6 +98,7 @@ export async function createBox(name?: string): Promise<PublicBox> {
 
   const id = shortId();
   const boxToken = randomBytes(24).toString("base64url");
+  const vncPassword = randomBytes(8).toString("base64url").slice(0, 8);
   const ports = await allocatePorts(BIND_HOST);
   const volumes = {
     workspace: path.join(DATA_DIR, "volumes", id, "workspace"),
@@ -96,6 +111,7 @@ export async function createBox(name?: string): Promise<PublicBox> {
     envFile,
     [
       `BOX_TOKEN=${boxToken}`,
+      `BOX_VNC_PASSWORD=${vncPassword}`,
       `BOX_ID=${id}`,
       "BOX_DESKTOP=1",
       "BOX_DESKTOP_REQUIRED=1",
@@ -114,6 +130,7 @@ export async function createBox(name?: string): Promise<PublicBox> {
     containerName: `ensurebox-${id}`,
     containerId: null,
     boxToken,
+    vncPassword,
     ports: { exec: ports.exec, host: ports.hostPort, novnc: ports.novnc },
     volumes,
     createdAt: nowIso(),
