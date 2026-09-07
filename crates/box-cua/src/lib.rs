@@ -3,6 +3,8 @@
 //! This crate talks to Xvfb via `import`/`scrot` and `xdotool`. It never
 //! calls an inference gateway — models live in L4.
 
+mod recipe;
+
 use std::env;
 use std::process::Stdio;
 
@@ -11,6 +13,11 @@ use base64::Engine;
 use box_desktop::{parse_geometry, DISPLAY_HEIGHT, DISPLAY_WIDTH};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
+
+pub use recipe::{
+    run_recipe, validate_recipe, RecipeRequest, RecipeResponse, RecipeScreenshot, RecipeStep,
+    RecipeStepResult, MAX_RECIPE_STEPS, MAX_WAIT_MS,
+};
 
 /// Capability flag name advertised by `box-host`.
 pub const CAPABILITY: &str = "cua";
@@ -104,7 +111,7 @@ pub struct MoveRequest {
     pub y: i32,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ScreenshotResponse {
     pub encoding: &'static str,
     pub mime: &'static str,
@@ -336,7 +343,7 @@ pub async fn drag(config: &CuaConfig, req: &DragRequest) -> Result<OkResponse, C
     Ok(OkResponse { ok: true })
 }
 
-fn ensure_ready(config: &CuaConfig) -> Result<(), CuaError> {
+pub(crate) fn ensure_ready(config: &CuaConfig) -> Result<(), CuaError> {
     if !config.enabled {
         return Err(CuaError::Disabled);
     }
