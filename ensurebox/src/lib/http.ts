@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { BoxHttpError } from "@/lib/box-client";
+import { GrokBoxError } from "@/lib/box-client";
 
 export function jsonError(status: number, code: string, message: string) {
   return NextResponse.json(
@@ -9,7 +9,7 @@ export function jsonError(status: number, code: string, message: string) {
 }
 
 export function handleRouteError(err: unknown) {
-  if (err instanceof BoxHttpError) {
+  if (err instanceof GrokBoxError) {
     return NextResponse.json(err.body ?? { error: { message: err.message } }, {
       status: err.status,
     });
