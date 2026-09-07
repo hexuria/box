@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { DATA_DIR } from "./config";
-import type { BoxRecord, PublicBox } from "./types";
+import type { BoxRecord, OperatorBox, PublicBox } from "./types";
 
 const STORE_PATH = path.join(DATA_DIR, "boxes.json");
 
@@ -9,11 +9,37 @@ type StoreFile = {
   boxes: BoxRecord[];
 };
 
+function normalizeRecord(raw: Partial<BoxRecord> & Pick<BoxRecord, "id">): BoxRecord | null {
+  if (!raw.id || !raw.boxToken) {
+    return null;
+  }
+  return {
+    id: raw.id,
+    name: raw.name || raw.id,
+    status: raw.status || "error",
+    image: raw.image || "",
+    containerName: raw.containerName || `ensurebox-${raw.id}`,
+    containerId: raw.containerId ?? null,
+    boxToken: raw.boxToken,
+    vncPassword: typeof raw.vncPassword === "string" ? raw.vncPassword : "",
+    ports: raw.ports || { exec: 0, host: 0, novnc: 0 },
+    volumes: raw.volumes || { workspace: "", chromeProfile: "" },
+    createdAt: raw.createdAt || new Date().toISOString(),
+    updatedAt: raw.updatedAt || new Date().toISOString(),
+    error: raw.error ?? null,
+  };
+}
+
 async function readStore(): Promise<StoreFile> {
   try {
     const raw = await readFile(STORE_PATH, "utf8");
     const parsed = JSON.parse(raw) as StoreFile;
-    return { boxes: Array.isArray(parsed.boxes) ? parsed.boxes : [] };
+    const boxes = Array.isArray(parsed.boxes)
+      ? parsed.boxes
+          .map((box) => normalizeRecord(box))
+          .filter((box): box is BoxRecord => box != null)
+      : [];
+    return { boxes };
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") {
       return { boxes: [] };
@@ -38,17 +64,23 @@ export function toPublicBox(box: BoxRecord): PublicBox {
     image: box.image,
     containerName: box.containerName,
     containerId: box.containerId,
-    ports: box.ports,
-    volumes: box.volumes,
     createdAt: box.createdAt,
     updatedAt: box.updatedAt,
     error: box.error,
+  };
+}
+
+export function toOperatorBox(box: BoxRecord): OperatorBox {
+  return {
+    ...toPublicBox(box),
+    ports: box.ports,
+    volumes: box.volumes,
     endpoints: {
       exec: `http://127.0.0.1:${box.ports.exec}`,
       host: `http://127.0.0.1:${box.ports.host}`,
       viewer: `http://127.0.0.1:${box.ports.novnc}/vnc.html`,
     },
-    vncPassword: box.boxToken.slice(0, 8),
+    vncPassword: box.vncPassword,
   };
 }
 

@@ -14,6 +14,7 @@ export type BoxRecord = {
   containerName: string;
   containerId: string | null;
   boxToken: string;
+  vncPassword: string;
   ports: {
     exec: number;
     host: number;
@@ -28,7 +29,23 @@ export type BoxRecord = {
   error: string | null;
 };
 
-export type PublicBox = Omit<BoxRecord, "boxToken"> & {
+/** JSON returned to L1 and `/api/v1`. No guest token, VNC password, or bind URLs. */
+export type PublicBox = {
+  id: string;
+  name: string;
+  status: BoxStatus;
+  image: string;
+  containerName: string;
+  containerId: string | null;
+  createdAt: string;
+  updatedAt: string;
+  error: string | null;
+};
+
+/** Operator console only. Host ports/volumes after login. Never sent to L1. */
+export type OperatorBox = PublicBox & {
+  ports: BoxRecord["ports"];
+  volumes: BoxRecord["volumes"];
   endpoints: {
     exec: string;
     host: string;
