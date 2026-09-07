@@ -99,8 +99,9 @@ export default async function HomePage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Workspaces</h1>
           <p className="mt-1 max-w-2xl text-sm text-zinc-600">
-            Open a box to run a shell, read and write files, and use the
-            desktop via screenshots. Guest tokens never reach this client.
+            Open a box to run a shell, read and write files, use the desktop
+            via screenshots, or run a one-call CUA recipe. Guest tokens never
+            reach this client.
           </p>
         </div>
 

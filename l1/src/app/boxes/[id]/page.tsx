@@ -108,8 +108,9 @@ export default async function BoxPage({
 
         {!asleep ? (
           <p className="text-sm text-zinc-600">
-            Desktop is the screenshot tab (1280×800, top-left origin). This
-            client does not open guest viewer ports.
+            Desktop is the screenshot tab (1280×800, top-left origin). Recipe
+            runs a multi-step plan in one EnsureBox call. This client does not
+            open guest viewer ports.
           </p>
         ) : null}
 
