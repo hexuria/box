@@ -3,12 +3,13 @@
 Connect-only client. Not published to PyPI.
 
 ```python
+import os
 from grok_box import GrokBox
 
 box = GrokBox.connect(
     "http://127.0.0.1:1337",
     "http://127.0.0.1:1340",
-    "dev-box-token",
+    os.environ["GROK_BOX_TOKEN"],
 )
 box.exec(command=["echo", "ok"])
 png = box.screenshot_png()
