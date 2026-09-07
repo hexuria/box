@@ -1,10 +1,12 @@
 # grok-box API contract
 
-Base URLs (Compose defaults):
+Base URLs (Compose defaults — **your** published URLs, not `/v1/info`):
 
 - Exec: `http://127.0.0.1:1337`
 - Host: `http://127.0.0.1:1340`
 - Desktop viewer: `http://127.0.0.1:6080/vnc.html`
+
+SDKs and the CLI are connect-only: pass those three values (exec URL, host URL, token). They ignore advertised `/v1/info` URLs.
 
 Machine-readable spec: [openapi.yaml](openapi.yaml).
 
@@ -23,6 +25,8 @@ Auth: `Authorization: Bearer <BOX_TOKEN>` unless noted. Errors:
 Common codes: `unauthorized`, `invalid_request`, `path_escape`, `not_found`, `payload_too_large`, `exec_failed`, `io_error`, `internal`, `not_ready`, `cua_disabled`, `display_unavailable`, `out_of_range`, `cua_backend`.
 
 CUA coordinate space is the X framebuffer **1280×800** (`BOX_DISPLAY_GEOM=1280x800x24`). Origin is top-left. Clicks outside that range return `400 out_of_range`.
+
+CORS is not permissive. Set `BOX_CORS_ORIGINS` to an explicit allowlist if a browser must call the guest.
 
 ---
 
@@ -62,7 +66,7 @@ Run a process. `cwd` defaults to the workspace root and is jail-checked.
 }
 ```
 
-On timeout: `timed_out: true`, `exit_code: null`, process group is killed. Output streams are capped (`BOX_MAX_OUTPUT_BYTES`, default 8 MiB); `truncated` is true if a cap hit.
+On timeout: `timed_out: true`, `exit_code: null`, process group is killed. **Captured stdout/stderr are kept.** Output streams are capped (`BOX_MAX_OUTPUT_BYTES`, default 8 MiB); `truncated` is true if a cap hit. After writing `stdin`, the pipe is closed so the child sees EOF. `BOX_TOKEN`, `BOX_HOST_TOKEN`, and `BOX_VNC_PASSWORD` are stripped from the child environment.
 
 Default timeout 30s; max 10 minutes (`BOX_DEFAULT_TIMEOUT_MS`, `BOX_MAX_TIMEOUT_MS`).
 
@@ -111,9 +115,31 @@ Directory:
 
 Max size: `BOX_MAX_FILE_BYTES` (default 10 MiB).
 
+### `DELETE /v1/files?path=&recursive=`
+
+Deletes a file or directory inside the jail. The workspace root cannot be deleted. Non-empty directories require `recursive=true`.
+
+```json
+{ "path": "/workspace/notes/hello.txt", "deleted": true }
+```
+
+### `POST /v1/files/mkdir`
+
+```json
+{ "path": "notes/sub", "parents": true }
+```
+
+```json
+{ "path": "/workspace/notes/sub", "created": true }
+```
+
+`parents` defaults to true. If the directory already exists, `created` is false.
+
 ### `POST /v1/cua/screenshot`
 
-Capture the root window of `BOX_DISPLAY` as PNG. Response is JSON (not a raw image) so L2 can log metadata without special content types.
+Capture the root window of `BOX_DISPLAY` as PNG.
+
+**JSON** (default): omit `Accept` or send `application/json`.
 
 ```json
 {
@@ -126,6 +152,8 @@ Capture the root window of `BOX_DISPLAY` as PNG. Response is JSON (not a raw ima
 }
 ```
 
+**Raw PNG:** `Accept: image/png` or `?format=png`. Body is `image/png` bytes.
+
 `503 cua_disabled` if `BOX_CUA=0`. `503 display_unavailable` if Xvfb is down. `502 cua_backend` if `import`/`scrot` fail.
 
 ### `POST /v1/cua/click`
@@ -135,6 +163,30 @@ Capture the root window of `BOX_DISPLAY` as PNG. Response is JSON (not a raw ima
 ```
 
 `button` is optional (default 1 = left; X buttons 1–7). `200 {"ok": true}`.
+
+### `POST /v1/cua/double-click`
+
+```json
+{ "x": 640, "y": 400, "button": 1 }
+```
+
+Two clicks at the point. Same button range as click.
+
+### `POST /v1/cua/move`
+
+Hover; no button.
+
+```json
+{ "x": 640, "y": 400 }
+```
+
+### `POST /v1/cua/drag`
+
+```json
+{ "x1": 100, "y1": 100, "x2": 400, "y2": 300, "button": 1 }
+```
+
+Mouse down at (x1,y1), move to (x2,y2), mouse up. Both points must be in range.
 
 ### `POST /v1/cua/type`
 
@@ -158,7 +210,7 @@ Typed via xdotool. Rejects empty or oversized payloads.
 { "x": 640, "y": 400, "dx": 0, "dy": 3 }
 ```
 
-Moves to `(x,y)` then emits wheel clicks. Positive `dy` scrolls down; negative up. `dx` is horizontal. At least one of `dx`/`dy` must be non-zero.
+Moves to `(x,y)` then emits wheel clicks in one xdotool invocation. Positive `dy` scrolls down; negative up. `dx` is horizontal. At least one of `dx`/`dy` must be non-zero.
 
 ---
 
@@ -201,11 +253,14 @@ Uses `BOX_HOST_TOKEN` if set, else `BOX_TOKEN`.
   },
   "endpoints": {
     "exec": "http://127.0.0.1:1337",
-    "host": "http://127.0.0.1:1340"
+    "host": "http://127.0.0.1:1340",
+    "scope": "container-local"
   },
   "workspace": "/workspace"
 }
 ```
+
+`endpoints` are the listen addresses **inside the guest** (`0.0.0.0` rewritten to loopback). They are not the URLs a remote SDK should dial. Callers always pass the URLs they published.
 
 ### `GET /v1/desktop` (bearer)
 
