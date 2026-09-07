@@ -50,7 +50,7 @@ The Recipe tab lists every CUA op (`click`, `type`, `key`, `scroll`, `wait`, …
 ## Environment
 
 | Variable | Default | Meaning |
-| --- | --- |
+| --- | --- | --- |
 | `ENSUREBOX_URL` | `http://127.0.0.1:43142` | Demo L2 base URL |
 | `ENSUREBOX_TOKEN` | required | Server-side Bearer token for EnsureBox |
 | `ENSUREBOX_ALLOW_INSECURE_DEV` | unset | `1` allows the well-known/short EnsureBox token locally |
