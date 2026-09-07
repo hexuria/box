@@ -214,6 +214,26 @@ Typed via xdotool. Rejects empty or oversized payloads.
 
 Moves to `(x,y)` then emits wheel clicks in one xdotool invocation. Positive `dy` scrolls down; negative up. `dx` is horizontal. At least one of `dx`/`dy` must be non-zero.
 
+### `POST /v1/cua/recipe`
+
+Many CUA steps in **one** request. The guest lints the plan (empty, too many steps, out of range) and returns **400** without moving the pointer if the plan is bad. Steps then run in order (one X pointer — not a parallel DAG). Default `screenshot` is `end`. See [`RECIPES.md`](RECIPES.md) for the reverse-web-mcp comparison.
+
+```json
+{
+  "name": "search",
+  "stop_on_error": true,
+  "screenshot": "end",
+  "steps": [
+    { "op": "click", "x": 640, "y": 80, "button": 1 },
+    { "op": "type", "text": "hello" },
+    { "op": "key", "key": "Return" },
+    { "op": "wait", "ms": 200 }
+  ]
+}
+```
+
+`200` is a receipt (`ok`, `ran`, `stopped_at`, `duration_ms`, `steps[]`, optional `screenshot`). A step failure with `stop_on_error: true` is still **200** with `ok: false`. Max 64 steps. Wait max 10s per step.
+
 ---
 
 ## box-host `:1340`

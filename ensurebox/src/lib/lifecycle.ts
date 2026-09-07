@@ -2,6 +2,7 @@ import { mkdir, rm, writeFile as writeFs } from "node:fs/promises";
 import path from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
 import { connectBox, waitUntilReady } from "./box-client";
+import type { RecipeRequest } from "grok-box";
 import { BIND_HOST, DATA_DIR, GROK_BOX_IMAGE, READY_TIMEOUT_MS } from "./config";
 import { containerInspect, docker, imageExists } from "./docker";
 import { allocatePorts } from "./ports";
@@ -362,4 +363,9 @@ export async function scroll(
 ): Promise<unknown> {
   const box = await requireBox(id);
   return connectBox(box).scroll(body.x, body.y, body.dx, body.dy);
+}
+
+export async function runRecipe(id: string, body: RecipeRequest): Promise<unknown> {
+  const box = await requireBox(id);
+  return connectBox(box).recipe(body);
 }
