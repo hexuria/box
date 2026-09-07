@@ -118,7 +118,7 @@ cd l1 && npm install && npm run dev          # human workspace, :43141
 ## Ports
 
 | Port | Published? | Process | Notes |
-| --- | --- | --- |
+| --- | --- | --- | --- |
 | **1337** | yes | `box-exec` | exec, files, CUA. Bind `BOX_EXEC_BIND`. |
 | **1340** | yes | `box-host` | health, ready, info, desktop, chrome. Bind `BOX_HOST_BIND`. |
 | **6080** | yes | websockify / noVNC | Viewer. `http://127.0.0.1:6080/vnc.html` |
