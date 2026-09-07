@@ -79,6 +79,24 @@ out="$(curl -fsS \
 echo "${out}"
 echo "${out}" | grep -q '"exit_code":0'
 
+echo "==> files mkdir/put/delete"
+smoke_dir="smoke-dir-$$"
+curl -fsS \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d "{\"path\":\"${smoke_dir}\",\"parents\":true}" \
+  "${BASE}/api/v1/boxes/${id}/files/mkdir" | grep -q '"created":true'
+curl -fsS \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -X PUT \
+  -d "{\"path\":\"${smoke_dir}/a.txt\",\"content\":\"hi\"}" \
+  "${BASE}/api/v1/boxes/${id}/files" | grep -q '"bytes_written"'
+curl -fsS \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -X DELETE \
+  "${BASE}/api/v1/boxes/${id}/files?path=${smoke_dir}/a.txt" | grep -q '"deleted":true'
+
 echo "==> POST screenshot"
 shot="$(curl -fsS \
   -H "Authorization: Bearer ${TOKEN}" \
@@ -92,6 +110,23 @@ assert b[:8]==b"\x89PNG\r\n\x1a\n"
 assert d["width"]==1280 and d["height"]==800
 print("png bytes", len(b))
 '
+
+echo "==> CUA move/double-click/drag"
+curl -fsS \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"x":80,"y":80}' \
+  "${BASE}/api/v1/boxes/${id}/cua/move" | grep -q '"ok":true'
+curl -fsS \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"x":80,"y":80}' \
+  "${BASE}/api/v1/boxes/${id}/cua/double-click" | grep -q '"ok":true'
+curl -fsS \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"x1":80,"y1":80,"x2":120,"y2":120}' \
+  "${BASE}/api/v1/boxes/${id}/cua/drag" | grep -q '"ok":true'
 
 echo
 echo "SMOKE OK"

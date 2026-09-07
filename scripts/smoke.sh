@@ -78,26 +78,31 @@ echo "${out}" | grep -q '"exit_code":0'
 echo "${out}" | grep -q ok
 
 echo "==> files put/get/mkdir/delete"
+smoke_dir="smoke-dir-$$"
 curl -fsS \
   -H "Authorization: Bearer ${TOKEN}" \
   -H "Content-Type: application/json" \
   -X POST \
-  -d '{"path":"smoke-dir","parents":true}' \
+  -d "{\"path\":\"${smoke_dir}\",\"parents\":true}" \
   "${EXEC_URL}/v1/files/mkdir" | grep -q '"created":true'
 curl -fsS \
   -H "Authorization: Bearer ${TOKEN}" \
   -H "Content-Type: application/json" \
   -X PUT \
-  -d '{"path":"smoke.txt","content":"hello"}' \
+  -d "{\"path\":\"${smoke_dir}/smoke.txt\",\"content\":\"hello\"}" \
   "${EXEC_URL}/v1/files" >/dev/null
 got="$(curl -fsS \
   -H "Authorization: Bearer ${TOKEN}" \
-  "${EXEC_URL}/v1/files?path=smoke.txt")"
+  "${EXEC_URL}/v1/files?path=${smoke_dir}/smoke.txt")"
 echo "${got}" | grep -q hello
 curl -fsS \
   -H "Authorization: Bearer ${TOKEN}" \
   -X DELETE \
-  "${EXEC_URL}/v1/files?path=smoke.txt" | grep -q '"deleted":true'
+  "${EXEC_URL}/v1/files?path=${smoke_dir}/smoke.txt" | grep -q '"deleted":true'
+curl -fsS \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -X DELETE \
+  "${EXEC_URL}/v1/files?path=${smoke_dir}&recursive=true" | grep -q '"deleted":true'
 
 echo "==> exec does not leak BOX_TOKEN"
 token_env="$(curl -fsS \
@@ -238,7 +243,11 @@ echo "${drag}" | grep -q '"ok":true'
 
 echo "==> BOX_DESKTOP=0 still serves exec+host"
 "${COMPOSE[@]}" down --remove-orphans >/dev/null 2>&1 || true
-BOX_DESKTOP=0 BOX_DESKTOP_REQUIRED=0 "${COMPOSE[@]}" up -d --force-recreate
+if [[ "${COMPOSE[0]}" == "sudo" ]]; then
+  sudo -n env BOX_DESKTOP=0 BOX_DESKTOP_REQUIRED=0 BOX_TOKEN="${TOKEN}" docker compose up -d --force-recreate
+else
+  BOX_DESKTOP=0 BOX_DESKTOP_REQUIRED=0 "${COMPOSE[@]}" up -d --force-recreate
+fi
 ok=0
 for _ in $(seq 1 90); do
   if curl -fsS "${EXEC_URL}/v1/health" >/dev/null 2>&1 \
@@ -254,6 +263,7 @@ if [[ "${ok}" != "1" ]]; then
   exit 1
 fi
 off_info="$(curl -fsS -H "Authorization: Bearer ${TOKEN}" "${HOST_URL}/v1/info")"
+echo "${off_info}"
 echo "${off_info}" | grep -q '"desktop":false'
 echo "${off_info}" | grep -q '"chrome":false'
 echo "${off_info}" | grep -q '"cua":false'

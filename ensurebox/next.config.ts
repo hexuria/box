@@ -1,16 +1,16 @@
 import type { NextConfig } from "next";
 import path from "node:path";
 
+const repoRoot = path.resolve(process.cwd(), "..");
+
 const nextConfig: NextConfig = {
-  output: "standalone",
-  poweredByHeader: false,
   transpilePackages: ["grok-box"],
-  // The grok-box SDK lives at ../sdk/typescript. Turbopack otherwise refuses
-  // to resolve a file: dependency above the app directory.
+  // The grok-box package is a file: link into ../sdk/typescript. Turbopack
+  // only resolves modules at or below `root`, which defaults to this app.
   turbopack: {
-    root: path.resolve(process.cwd(), ".."),
+    root: repoRoot,
   },
-  outputFileTracingRoot: path.resolve(process.cwd(), ".."),
+  outputFileTracingRoot: repoRoot,
 };
 
 export default nextConfig;
