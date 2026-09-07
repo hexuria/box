@@ -24,11 +24,12 @@ Then in another terminal:
 ```bash
 cd l1
 cp .env.example .env
+# L1_TOKEN for the human session; ENSUREBOX_TOKEN server-side only (must match L2)
 npm install
 npm run dev
 ```
 
-Open [http://127.0.0.1:43141](http://127.0.0.1:43141). Create a workspace, run a command, read/write a file, take a screenshot, or open the live desktop. All of those requests go to EnsureBox at `http://127.0.0.1:43142`.
+Open [http://127.0.0.1:43141](http://127.0.0.1:43141) and sign in with `L1_TOKEN`. Create a workspace, run a command, read/write a file, or take a screenshot. All of those requests go to EnsureBox at `http://127.0.0.1:43142`. The browser never receives `ENSUREBOX_TOKEN` or a guest token.
 
 ## What it does
 
@@ -40,16 +41,19 @@ Open [http://127.0.0.1:43141](http://127.0.0.1:43141). Create a workspace, run a
 | Files | `GET` / `PUT /api/v1/boxes/:id/files` |
 | Computer use | `POST /api/v1/boxes/:id/cua/*` |
 
-Auth: `Authorization: Bearer <ENSUREBOX_TOKEN>` (default `dev-ensurebox-token`). That token belongs to the demo L2 API, not to a guest.
+Auth: pages and server actions require `L1_TOKEN` (httpOnly cookie after login). The L1 server calls EnsureBox with `Authorization: Bearer <ENSUREBOX_TOKEN>`. That token belongs to the demo L2 API, not to a guest, and is never sent to the browser.
 
-The optional “Open live desktop” link uses the noVNC URL EnsureBox published. The L1 server does not fetch that URL.
+Desktop is screenshots through EnsureBox CUA. L1 does not link guest noVNC ports or show a VNC password.
 
 ## Environment
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `ENSUREBOX_URL` | `http://127.0.0.1:43142` | Demo L2 base URL |
-| `ENSUREBOX_TOKEN` | `dev-ensurebox-token` | Bearer token for EnsureBox |
+| `ENSUREBOX_TOKEN` | required | Server-side Bearer token for EnsureBox |
+| `ENSUREBOX_ALLOW_INSECURE_DEV` | unset | `1` allows the well-known/short EnsureBox token locally |
+| `L1_TOKEN` | required | Human login for this UI |
+| `L1_ALLOW_INSECURE_DEV` | unset | `1` allows the well-known/short L1 token locally |
 
 ## Smoke
 
@@ -59,4 +63,4 @@ With L1 and EnsureBox both running:
 ./scripts/smoke.sh
 ```
 
-The script asserts L1 source never mentions `BOX_TOKEN` or guest binds `:1337` / `:1340`.
+The script asserts L1 source never mentions `BOX_TOKEN`, guest binds `:1337` / `:1340`, `vncPassword`, or a raw 6080 password UI. Unauthenticated HTML is a login page.

@@ -8,13 +8,20 @@ cd "${APP}"
 
 TOKEN="${ENSUREBOX_TOKEN:-dev-ensurebox-token}"
 BASE="${ENSUREBOX_URL:-http://127.0.0.1:43142}"
+COOKIE_JAR="$(mktemp)"
+trap 'rm -f "${COOKIE_JAR}"' EXIT
 
 echo "==> GET /api/v1/health"
 curl -fsS "${BASE}/api/v1/health" | grep -q '"service":"ensurebox"'
 
-echo "==> operator console is not a tools UI"
+echo "==> operator HTML without session is login, not docker buttons"
 home_html="$(curl -fsS "${BASE}/")"
 echo "${home_html}" | grep -q "Operator console"
+echo "${home_html}" | grep -q "Sign in"
+if echo "${home_html}" | grep -q "Create box"; then
+  echo "unauthenticated operator HTML must not include Create box" >&2
+  exit 1
+fi
 if echo "${home_html}" | grep -q "Screenshot"; then
   echo "EnsureBox home must not include CUA tools" >&2
   exit 1
@@ -27,14 +34,25 @@ if [[ "${code}" != "401" ]]; then
   exit 1
 fi
 
+echo "==> session login"
+curl -fsS -c "${COOKIE_JAR}" \
+  -H "Content-Type: application/json" \
+  -d "{\"token\":\"${TOKEN}\"}" \
+  "${BASE}/api/session" | grep -q '"ok":true'
+
+echo "==> operator console after login is inventory, not a tools UI"
+authed_home="$(curl -fsS -b "${COOKIE_JAR}" "${BASE}/")"
+echo "${authed_home}" | grep -q "Provision"
+echo "${authed_home}" | grep -q "Create box"
+if echo "${authed_home}" | grep -q "Screenshot"; then
+  echo "EnsureBox home must not include CUA tools" >&2
+  exit 1
+fi
+
 if ! docker image inspect "${GROK_BOX_IMAGE:-grok-box:local}" >/dev/null 2>&1; then
-  if sudo -n docker image inspect "${GROK_BOX_IMAGE:-grok-box:local}" >/dev/null 2>&1; then
-    :
-  else
-    echo "skipping create: grok-box image not found. Build with: (cd ${ROOT} && docker compose build)" >&2
-    echo "SMOKE OK (api only)"
-    exit 0
-  fi
+  echo "skipping create: grok-box image not found. Build with: (cd ${ROOT} && docker compose build)" >&2
+  echo "SMOKE OK (api only)"
+  exit 0
 fi
 
 echo "==> POST /api/v1/boxes (create + wait ready)"
@@ -44,21 +62,27 @@ created="$(curl -fsS \
   -d '{"name":"smoke"}' \
   "${BASE}/api/v1/boxes")"
 echo "${created}"
-id="$(printf '%s' "${created}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
-status="$(printf '%s' "${created}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')"
-if [[ "${status}" != "ready" ]]; then
-  echo "box was not ready: ${status}" >&2
-  curl -s -H "Authorization: Bearer ${TOKEN}" -X DELETE "${BASE}/api/v1/boxes/${id}" || true
-  exit 1
-fi
+printf '%s' "${created}" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+assert "vncPassword" not in d, d
+assert "endpoints" not in d, d
+assert "ports" not in d, d
+assert "boxToken" not in d, d
+assert d.get("status")=="ready", d
+print(d["id"])
+' > /tmp/ensurebox-smoke-id
+id="$(cat /tmp/ensurebox-smoke-id)"
+rm -f /tmp/ensurebox-smoke-id
 
 cleanup() {
   curl -s -H "Authorization: Bearer ${TOKEN}" -X DELETE "${BASE}/api/v1/boxes/${id}" >/dev/null || true
+  rm -f "${COOKIE_JAR}"
 }
 trap cleanup EXIT
 
 echo "==> operator box page has inventory, not Shell/CUA"
-box_html="$(curl -fsS "${BASE}/boxes/${id}")"
+box_html="$(curl -fsS -b "${COOKIE_JAR}" "${BASE}/boxes/${id}")"
 echo "${box_html}" | grep -q "Volumes"
 echo "${box_html}" | grep -q "VNC password"
 if echo "${box_html}" | grep -q "Screenshot"; then
@@ -67,6 +91,13 @@ if echo "${box_html}" | grep -q "Screenshot"; then
 fi
 if echo "${box_html}" | grep -q ">Shell<"; then
   echo "EnsureBox box page must not include a Shell tab" >&2
+  exit 1
+fi
+
+echo "==> unauthenticated box page has no lifecycle buttons"
+unauth_box="$(curl -fsS "${BASE}/boxes/${id}")"
+if echo "${unauth_box}" | grep -q "Destroy"; then
+  echo "unauthenticated operator HTML must not include Destroy" >&2
   exit 1
 fi
 

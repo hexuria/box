@@ -21,17 +21,15 @@ Then:
 ```bash
 cd ensurebox
 cp .env.example .env
+# ENSUREBOX_TOKEN is required. The example uses a well-known value with
+# ENSUREBOX_ALLOW_INSECURE_DEV=1 for loopback only.
 npm install
 npm run dev
 ```
 
-Open [http://127.0.0.1:43142](http://127.0.0.1:43142) to provision a guest, inspect host ports and volumes, and start or destroy it. Use the L1 demo on [http://127.0.0.1:43141](http://127.0.0.1:43141) to work in the box, or call the guest with the `grok-box` CLI / SDK using the published URLs and token **you** injected.
+Open [http://127.0.0.1:43142](http://127.0.0.1:43142), sign in with `ENSUREBOX_TOKEN`, then provision a guest. Use the L1 demo on [http://127.0.0.1:43141](http://127.0.0.1:43141) to work in the box, or call the guest with the `grok-box` CLI / SDK using the published URLs and token **you** injected.
 
-If the Node process cannot talk to Docker, run:
-
-```bash
-sg docker -c 'npm run dev'
-```
+If the Node process cannot talk to Docker, add your user to the `docker` group and re-login. EnsureBox does **not** fall back to `sudo`.
 
 ## What it does
 
@@ -50,7 +48,7 @@ Published guest ports are bound to `127.0.0.1`. Raw VNC (5900) and CDP (9222) st
 
 Base: `http://127.0.0.1:43142`
 
-Auth: `Authorization: Bearer <ENSUREBOX_TOKEN>` except `GET /api/v1/health`.
+Auth: `Authorization: Bearer <ENSUREBOX_TOKEN>` except `GET /api/v1/health`. The operator HTML uses the same token via an httpOnly session cookie (`POST /api/session`). Unauthenticated browsers see a login page, not Docker buttons. `ENSUREBOX_TOKEN` must be set; `dev-ensurebox-token` is rejected unless `ENSUREBOX_ALLOW_INSECURE_DEV=1`.
 
 | Method | Path |
 | --- | --- |
@@ -74,7 +72,7 @@ Auth: `Authorization: Bearer <ENSUREBOX_TOKEN>` except `GET /api/v1/health`.
 | POST | `/api/v1/boxes/:id/cua/key` |
 | POST | `/api/v1/boxes/:id/cua/scroll` |
 
-The operator console never sends the guest `BOX_TOKEN` to the browser. Responses omit it. VNC password is shown as a viewer password, not as a usable box credential.
+The operator console never sends the guest `BOX_TOKEN` to the browser or to L1. Public `/api/v1` box JSON omits guest bind URLs and the VNC password. After login, the operator page may show host ports/volumes and the independent VNC password (not derived from the box token). 6080 is not Bearer-authenticated.
 
 ## Smoke
 
@@ -82,4 +80,4 @@ The operator console never sends the guest `BOX_TOKEN` to the browser. Responses
 ./scripts/smoke.sh
 ```
 
-Requires Docker, a `grok-box:local` (or `GROK_BOX_IMAGE`) image, and a running EnsureBox server (`npm run dev`). The script hits the HTTP API (including exec and screenshot) and checks that the dashboard HTML is not a tools UI.
+Requires Docker as the current user, a `grok-box:local` (or `GROK_BOX_IMAGE`) image, and a running EnsureBox server (`npm run dev`). The script hits the HTTP API (including exec and screenshot), checks that HTML without a session cannot create boxes, and checks that the dashboard HTML is not a tools UI.
