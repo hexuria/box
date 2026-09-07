@@ -241,6 +241,18 @@ impl GrokBox {
         .await
     }
 
+    /// Run many CUA steps in one request. The guest validates the whole plan
+    /// before moving the pointer.
+    pub async fn recipe(&self, request: &Value) -> Result<Value, Error> {
+        self.send_json(
+            "POST",
+            &format!("{}/v1/cua/recipe", self.exec_url),
+            Some(request.clone()),
+            true,
+        )
+        .await
+    }
+
     async fn send_json<T: for<'de> Deserialize<'de>>(
         &self,
         method: &str,
