@@ -7,6 +7,7 @@ import { loginMatches, requireL1Session, sessionCookieOptions, SESSION_COOKIE } 
 import { tryGetL1Token } from "./config";
 import * as ensurebox from "./ensurebox";
 import { EnsureboxError } from "./ensurebox";
+import type { RecipeReceipt, RecipeRequest, ScreenshotResult } from "./types";
 
 function isNextControlFlow(err: unknown): boolean {
   return (
@@ -207,5 +208,142 @@ export async function scrollAction(
     return { ok: true };
   } catch (err) {
     return fail(err);
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function pngFromShot(shot: ScreenshotResult | undefined): {
+  png?: string;
+  width?: number;
+  height?: number;
+} {
+  if (!shot?.png_base64) {
+    return {};
+  }
+  return {
+    png: shot.png_base64,
+    width: shot.width,
+    height: shot.height,
+  };
+}
+
+/** Drop huge PNGs from the receipt JSON; keep width/height/bytes for the UI dump. */
+function omitPng(shot: ScreenshotResult | undefined): ScreenshotResult | undefined {
+  if (!shot) {
+    return shot;
+  }
+  const { png_base64: _omitted, ...rest } = shot;
+  return rest;
+}
+
+function sanitizeReceipt(raw: RecipeReceipt): {
+  receipt: RecipeReceipt;
+  png?: string;
+  width?: number;
+  height?: number;
+} {
+  let shot = pngFromShot(raw.screenshot);
+  const steps = (raw.steps ?? []).map((step) => {
+    if (!shot.png) {
+      shot = pngFromShot(step.screenshot);
+    }
+    return { ...step, screenshot: omitPng(step.screenshot) };
+  });
+  return {
+    receipt: {
+      ...raw,
+      steps,
+      screenshot: omitPng(raw.screenshot),
+    },
+    ...shot,
+  };
+}
+
+function failRecipe(err: unknown): {
+  error: string;
+  status?: number;
+  code?: string;
+  lintFailed?: boolean;
+} {
+  if (isNextControlFlow(err)) {
+    throw err;
+  }
+  if (err instanceof EnsureboxError) {
+    if (err.status === 400) {
+      return {
+        error: `${err.message} The guest lints the whole plan first (HTTP 400${err.code ? ` ${err.code}` : ""}); nothing moved.`,
+        status: err.status,
+        code: err.code,
+        lintFailed: true,
+      };
+    }
+    if (err.status === 404) {
+      return {
+        error: `${err.message} This guest may predate POST /v1/cua/recipe — rebuild grok-box:local and create a new workspace.`,
+        status: err.status,
+        code: err.code,
+      };
+    }
+    return { error: err.message, status: err.status, code: err.code };
+  }
+  return { error: err instanceof Error ? err.message : String(err) };
+}
+
+export async function recipeAction(
+  id: string,
+  planJson: string,
+): Promise<{
+  error?: string;
+  status?: number;
+  code?: string;
+  lintFailed?: boolean;
+  result?: RecipeReceipt;
+  png?: string;
+  width?: number;
+  height?: number;
+}> {
+  try {
+    await requireL1Session();
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(planJson);
+    } catch {
+      return { error: "Invalid JSON. Fix the plan and try again. Nothing was sent." };
+    }
+    if (!isRecord(parsed) || !Array.isArray(parsed.steps)) {
+      return { error: "Recipe must be a JSON object with a steps array. Nothing was sent." };
+    }
+    if (parsed.steps.length === 0) {
+      return {
+        error:
+          "steps must not be empty. The guest would reject this with HTTP 400 and nothing would move.",
+        status: 400,
+        lintFailed: true,
+      };
+    }
+    const body: RecipeRequest = {
+      steps: parsed.steps,
+    };
+    if (typeof parsed.name === "string") {
+      body.name = parsed.name;
+    }
+    if (typeof parsed.stop_on_error === "boolean") {
+      body.stop_on_error = parsed.stop_on_error;
+    }
+    if (
+      parsed.screenshot === "none" ||
+      parsed.screenshot === "end" ||
+      parsed.screenshot === "each"
+    ) {
+      body.screenshot = parsed.screenshot;
+    }
+    const raw = await ensurebox.runRecipe(id, body);
+    const { receipt, png, width, height } = sanitizeReceipt(raw);
+    return { result: receipt, png, width, height };
+  } catch (err) {
+    return failRecipe(err);
   }
 }
