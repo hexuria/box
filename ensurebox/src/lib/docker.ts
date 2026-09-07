@@ -82,7 +82,13 @@ export async function containerInspect(
       return null;
     }
     return { id, running: running === "true" };
-  } catch {
-    return null;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    // Only a missing container is idle/offline. Docker permission or daemon
+    // failures must not look like a stopped box.
+    if (/no such (object|container)/i.test(message)) {
+      return null;
+    }
+    throw err;
   }
 }
