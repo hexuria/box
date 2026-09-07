@@ -180,6 +180,7 @@ l1/                  demo human UI (EnsureBox only)
 
 ## Docs
 
+- [Deploy](docs/DEPLOY.md) — test-deploy on **Akamai Cloud** (Linode; not Vultr), then the same pattern on AWS/GCP/Azure. First test is one VM, guest Compose only, private SSH tunnel or Tailscale; CLI/SDK from your laptop. Do not expose 1337/1340/6080 on the public internet.
 - [Architecture](docs/ARCHITECTURE.md)
 - [Startup](docs/STARTUP.md)
 - [Request processing](docs/PROCESSING.md)
