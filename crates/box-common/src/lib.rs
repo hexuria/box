@@ -11,9 +11,7 @@ pub mod jail;
 pub mod listen;
 
 pub use auth::{bearer_token, tokens_equal};
-pub use config::{
-    wipe_secret_environ, BoxConfig, ConfigError, MIN_TOKEN_LEN, SECRET_ENV_KEYS,
-};
+pub use config::{wipe_secret_environ, BoxConfig, ConfigError, MIN_TOKEN_LEN, SECRET_ENV_KEYS};
 pub use cors::layer as cors_layer;
 pub use error::{ApiError, ErrorBody, ErrorResponse};
 pub use jail::{resolve_in_jail, JailError};

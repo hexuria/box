@@ -140,6 +140,11 @@ enum CuaCmd {
         #[arg(long)]
         dy: i32,
     },
+    /// POST /v1/cua/recipe — many CUA steps, one request
+    Recipe {
+        #[arg(long)]
+        file: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -252,6 +257,13 @@ async fn main() -> Result<()> {
             CuaCmd::Key { key } => print_json(&box_client.key(&key).await?)?,
             CuaCmd::Scroll { x, y, dx, dy } => {
                 print_json(&box_client.scroll(x, y, dx, dy).await?)?;
+            }
+            CuaCmd::Recipe { file } => {
+                let raw = std::fs::read_to_string(&file)
+                    .with_context(|| format!("read {}", file.display()))?;
+                let request: serde_json::Value = serde_json::from_str(&raw)
+                    .with_context(|| format!("parse {}", file.display()))?;
+                print_json(&box_client.recipe(&request).await?)?;
             }
         },
     }

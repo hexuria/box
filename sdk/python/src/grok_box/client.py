@@ -173,6 +173,10 @@ class GrokBox:
             {"x": x, "y": y, "dx": dx, "dy": dy},
         )
 
+    def recipe(self, request: Mapping[str, Any]) -> Any:
+        """Run many CUA steps in one request. The guest lints the plan first."""
+        return self._auth("POST", f"{self.exec_url}/v1/cua/recipe", dict(request))
+
     def _public(self, url: str) -> Any:
         response = self._http.get(url)
         return self._decode(response, url)
