@@ -94,7 +94,7 @@ export class GrokBox {
   }
 
   async ready(): Promise<unknown> {
-    return this.publicJson(`${this.hostUrl}/v1/ready`);
+    return this.authJson("GET", `${this.hostUrl}/v1/ready`);
   }
 
   /** Inventory only. Do not dial `endpoints` from this payload. */
