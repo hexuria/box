@@ -141,7 +141,7 @@ noVNC is a **full desktop session** (keyboard/mouse on 1280×800). Treat **6080*
     ```
 
     CLI uses `http://127.0.0.1:1337` and `http://127.0.0.1:1340`.
-  - **Tailscale** (or WireGuard): install on the VM + laptop. Point the CLI at `http://\u003ctailscale-100.x\u003e:1337`. Cloud Firewall still blocks the **public** NIC. Tailscale may fall back to DERP if UDP **41641** is not open — that is fine for a test.
+  - **Tailscale** (or WireGuard): install on the VM + laptop. Point the CLI at `http://<tailscale-100.x>:1337`. Cloud Firewall still blocks the **public** NIC. Tailscale may fall back to DERP if UDP **41641** is not open — that is fine for a test.
 
 Compose publishes `127.0.0.1`. **Firewall is still wise** even for a “private” test: Akamai gives the VM a **public IPv4** (and usually IPv6). Loopback publish is now the default in this repo:
 
@@ -222,9 +222,9 @@ Akamai Cloud Compute **is** Linode. The OpenTofu/Terraform provider for **VMs** 
    git clone https://github.com/hexuria/box.git
    cd box
    umask 077
-   openssl rand -base64 32 \u003e /tmp/box-token
+   openssl rand -base64 32 > /tmp/box-token
    BOX_VNC_PASSWORD=$(openssl rand -base64 12 | tr -dc 'A-Za-z0-9' | head -c 8)
-   cat \u003e .env \u003c\u003cEOF
+   cat > .env <<EOF
    BOX_TOKEN=$(cat /tmp/box-token)
    BOX_VNC_PASSWORD=${BOX_VNC_PASSWORD}
    BOX_ID=akamai-test
@@ -272,7 +272,7 @@ runcmd:
   - chown -R 1000:1000 /opt/grok-box/workspace-data /opt/grok-box/chrome-profile
   - |
       echo "Clone done. SSH in, write /opt/grok-box/.env with BOX_TOKEN, then:"
-      echo "  cd /opt/grok-box \u0026\u0026 docker compose up --build -d"
+      echo "  cd /opt/grok-box && docker compose up --build -d"
 ```
 
 Pass this as Metadata `user_data` (API wants **base64**). Then SSH, write `.env`, compose up. Unattended “clone + compose up” is possible if you inject the token via a secret mount later; do not bake it into the StackScript body (visible via API).
@@ -283,7 +283,7 @@ Pass this as Metadata `user_data` (API wants **base64**). Then SSH, write `.env`
 
 **When:** after the manual VM works, so you can recreate/destroy cleanly. **Do not start here** for the first “does Chromium even fit” test.
 
-**OpenTofu** is the OSS default. Terraform is equivalent for this (same HCL). Pin `linode/linode` v3 (`~\u003e 3.0`). Auth: `export LINODE_TOKEN=…` on **your** machine. Local state is OK for a personal test (`terraform.tfstate` has IPs, not the Linode token if you used the env var — still do not commit state). Never put tokens in `*.tfvars` committed to git.
+**OpenTofu** is the OSS default. Terraform is equivalent for this (same HCL). Pin `linode/linode` v3 (`~> 3.0`). Auth: `export LINODE_TOKEN=…` on **your** machine. Local state is OK for a personal test (`terraform.tfstate` has IPs, not the Linode token if you used the env var — still do not commit state). Never put tokens in `*.tfvars` committed to git.
 
 This pass does **not** ship a full module. Resource list for Akamai:
 
@@ -292,7 +292,7 @@ This pass does **not** ship a full module. Resource list for Akamai:
 | `linode_instance` | `image = "linode/ubuntu24.04"`, `type = "g6-standard-4"`, `region = var.region`, `authorized_keys = [var.ssh_public_key]`, `metadata { user_data = base64encode(file("cloud-init.yaml")) }`. Avoid `root_pass` if keys suffice. |
 | `linode_firewall` | `inbound_policy = "DROP"`, `outbound_policy = "ACCEPT"`, allow TCP 22 (and 443 only if you later go public). Cover **ipv4 and ipv6**. Attach with `linodes = [linode_instance.box.id]` (or `linode_firewall_device`). |
 | `linode_domain` / `linode_domain_record` | Optional, public HTTPS only. |
-| Outputs | IPv4, IPv6, `ssh root@\u2026`, suggested `-L` tunnel command. |
+| Outputs | IPv4, IPv6, `ssh root@…`, suggested `-L` tunnel command. |
 
 Sketch (not a maintained module — check [registry.terraform.io/providers/linode/linode](https://registry.terraform.io/providers/linode/linode/latest/docs) before apply):
 
@@ -301,7 +301,7 @@ terraform {
   required_providers {
     linode = {
       source  = "linode/linode"
-      version = "~\u003e 3.0"
+      version = "~> 3.0"
     }
   }
 }
@@ -346,7 +346,7 @@ output "tunnel" {
 **Other clouds — copy Compose + cloud-init, swap the VM resource:**
 
 | Cloud | VM | Firewall | Image / bootstrap |
-| --- | --- | --- |
+| --- | --- | --- | --- |
 | **AWS** | One **EC2** `t3.large` (2 vCPU / 8 GB) or `t3.xlarge` if the build is tight. No ALB for the first test. | **Security group**: 22 (your IP), later 443. Not 1337/1340/6080. | Ubuntu 24.04 AMI (Canonical). Same cloud-init as `user_data`. Provider `hashicorp/aws`. |
 | **GCP** | One **Compute Engine** `e2-standard-2` (2 vCPU / 8 GB). | VPC firewall **tags**: `allow-ssh`, later `allow-https`. | `ubuntu-2404-lts`. `metadata.startup-script`. Provider `hashicorp/google`. |
 | **Azure** | One VM **Standard_D2s_v5** or **Standard_B2ms** (~8 GB). | **NSG**: 22, later 443. | Ubuntu 24.04 LTS. Custom data = cloud-init. Provider `hashicorp/azurerm`. |
@@ -373,7 +373,7 @@ EnsureBox is a **host Docker** orchestrator (it `docker run`s guests). It does n
 
 Build on a beefy machine or CI, push to **GHCR** (Akamai has **no** first-class managed container registry like ECR — use GHCR, or ECR/GCR/ACR on those clouds). VM only `docker compose pull` / `docker run`.
 
-Until that exists, `git clone \u0026\u0026 docker compose up --build` is the path.
+Until that exists, `git clone && docker compose up --build` is the path.
 
 ---
 
