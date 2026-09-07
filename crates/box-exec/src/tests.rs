@@ -59,7 +59,8 @@ async fn health_is_public() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["status"], "ok");
-    assert_eq!(body["service"], "box-exec");
+    assert!(body.get("service").is_none());
+    assert!(body.get("version").is_none());
 }
 
 #[tokio::test]
