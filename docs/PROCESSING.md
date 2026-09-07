@@ -16,15 +16,16 @@ The caller already has three values from **their** orchestrator:
 
 | Request | Process | Meaning |
 | --- | --- | --- |
-| `GET {execUrl}/v1/health` | box-exec | Process is alive |
-| `GET {hostUrl}/v1/health` | box-host | Process is alive |
-| `GET {hostUrl}/v1/ready` | box-host | Exec health OK, and X up when `BOX_DESKTOP_REQUIRED=1` |
+| `GET {execUrl}/v1/health` | box-exec | Process is alive (`{"status":"ok"}`) |
+| `GET {hostUrl}/v1/health` | box-host | Process is alive (`{"status":"ok"}`) |
 
-Compose healthcheck is `/v1/ready` on 1340. Chrome is not required for ready.
+`GET {hostUrl}/v1/ready` requires Bearer. 200 when exec health OK, and X up when `BOX_DESKTOP_REQUIRED=1`.
+
+Compose healthcheck is `/v1/ready` on 1340 with `Authorization: Bearer`. Chrome is not required for ready.
 
 ## Authenticated calls
 
-All other routes require `Authorization: Bearer <token>`.
+All other routes require `Authorization: Bearer <token>`, including `/v1/ready`.
 
 box-host uses `BOX_HOST_TOKEN` if set, otherwise `BOX_TOKEN`.
 
@@ -40,7 +41,7 @@ CORS is not permissive. Server-to-server callers are unaffected. Browsers only g
 
 1. Jail-check `cwd` under `WORKSPACE_ROOT`.
 2. Spawn argv or `/bin/sh -c`.
-3. Strip `BOX_TOKEN`, `BOX_HOST_TOKEN`, and `BOX_VNC_PASSWORD` from the child (including caller-supplied `env`).
+3. Strip `BOX_TOKEN`, `BOX_HOST_TOKEN`, and `BOX_VNC_PASSWORD` from the child (including caller-supplied `env`). The daemons also drop those names from their own environ after config load.
 4. Write `stdin` if provided, then close the pipe so the child sees EOF.
 5. Cap stdout/stderr (`BOX_MAX_OUTPUT_BYTES`).
 6. On timeout: kill the process group, **keep** whatever output was captured, `timed_out: true`, `exit_code: null`.
@@ -75,8 +76,8 @@ Actuators talk to `DISPLAY=:1` (1280×800, origin top-left). Out-of-range coordi
 
 `GET /v1/info` (bearer) returns box id, capability flags, workspace path, and **container-local** endpoint URLs (`scope: container-local`). Use it to see whether desktop/chrome/CUA are up. Do not dial those URLs from another machine; dial the URLs you published.
 
-`GET /v1/desktop` and `GET /v1/chrome` are the same: status inside the guest. Viewer and CDP addresses are loopback unless you published noVNC (6080) yourself.
+`GET /v1/desktop` and `/v1/chrome` are the same: status inside the guest. Viewer and CDP addresses are loopback unless you published noVNC (6080) yourself.
 
 ## Demo proxy (EnsureBox)
 
-When the EnsureBox demo is running, L1 sends `ENSUREBOX_TOKEN` to `http://127.0.0.1:43142/api/v1/boxes/:id/...`. EnsureBox looks up the guest token and calls the TypeScript `grok-box` SDK with the **published** host ports. The guest token never appears in L1.
+When the EnsureBox demo is running, a signed-in L1 user sends requests to `http://127.0.0.1:43142/api/v1/boxes/:id/...`. The L1 **server** attaches `ENSUREBOX_TOKEN`. The browser never receives that token or `BOX_TOKEN`. EnsureBox looks up the guest token and calls the TypeScript `grok-box` SDK with the **published** host ports. Public box JSON omits VNC passwords and guest bind URLs.
