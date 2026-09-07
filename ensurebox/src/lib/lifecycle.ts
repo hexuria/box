@@ -1,7 +1,7 @@
 import { mkdir, rm, writeFile as writeFs } from "node:fs/promises";
 import path from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
-import { boxJson, waitUntilReady } from "./box-client";
+import { connectBox, waitUntilReady } from "./box-client";
 import { BIND_HOST, DATA_DIR, GROK_BOX_IMAGE, READY_TIMEOUT_MS } from "./config";
 import { containerInspect, docker, imageExists } from "./docker";
 import { allocatePorts } from "./ports";
@@ -238,7 +238,7 @@ export async function destroyBox(id: string): Promise<void> {
 
 export async function boxInfo(id: string): Promise<unknown> {
   const box = await requireBox(id);
-  return boxJson(box, box.ports.host, "/v1/info");
+  return connectBox(box).info();
 }
 
 export async function boxCapabilities(id: string): Promise<Capabilities | null> {
@@ -255,17 +255,12 @@ export async function execCommand(
   command: string[] | string,
 ): Promise<unknown> {
   const box = await requireBox(id);
-  return boxJson(box, box.ports.exec, "/v1/exec", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ command }),
-  });
+  return connectBox(box).exec({ command });
 }
 
 export async function readFile(id: string, filePath: string): Promise<unknown> {
   const box = await requireBox(id);
-  const query = new URLSearchParams({ path: filePath });
-  return boxJson(box, box.ports.exec, `/v1/files?${query.toString()}`);
+  return connectBox(box).filesGet(filePath);
 }
 
 export async function writeGuestFile(
@@ -274,22 +269,31 @@ export async function writeGuestFile(
   content: string,
 ): Promise<unknown> {
   const box = await requireBox(id);
-  return boxJson(box, box.ports.exec, "/v1/files", {
-    method: "PUT",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ path: filePath, content, create_dirs: true }),
-  });
+  return connectBox(box).filesPut({ path: filePath, content, create_dirs: true });
+}
+
+export async function deleteGuestFile(
+  id: string,
+  filePath: string,
+  recursive = false,
+): Promise<unknown> {
+  const box = await requireBox(id);
+  return connectBox(box).filesDelete(filePath, recursive);
+}
+
+export async function mkdirGuest(id: string, filePath: string, parents = true): Promise<unknown> {
+  const box = await requireBox(id);
+  return connectBox(box).filesMkdir(filePath, parents);
 }
 
 export async function screenshot(id: string): Promise<unknown> {
   const box = await requireBox(id);
-  return boxJson(
-    box,
-    box.ports.exec,
-    "/v1/cua/screenshot",
-    { method: "POST" },
-    60_000,
-  );
+  return connectBox(box).screenshot();
+}
+
+export async function screenshotPng(id: string): Promise<Uint8Array> {
+  const box = await requireBox(id);
+  return connectBox(box).screenshotPng();
 }
 
 export async function click(
@@ -299,29 +303,40 @@ export async function click(
   button?: number,
 ): Promise<unknown> {
   const box = await requireBox(id);
-  return boxJson(box, box.ports.exec, "/v1/cua/click", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ x, y, button }),
-  });
+  return connectBox(box).click(x, y, button);
+}
+
+export async function doubleClick(
+  id: string,
+  x: number,
+  y: number,
+  button?: number,
+): Promise<unknown> {
+  const box = await requireBox(id);
+  return connectBox(box).doubleClick(x, y, button);
+}
+
+export async function movePointer(id: string, x: number, y: number): Promise<unknown> {
+  const box = await requireBox(id);
+  return connectBox(box).move(x, y);
+}
+
+export async function drag(
+  id: string,
+  body: { x1: number; y1: number; x2: number; y2: number; button?: number },
+): Promise<unknown> {
+  const box = await requireBox(id);
+  return connectBox(box).drag(body.x1, body.y1, body.x2, body.y2, body.button);
 }
 
 export async function typeText(id: string, text: string): Promise<unknown> {
   const box = await requireBox(id);
-  return boxJson(box, box.ports.exec, "/v1/cua/type", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ text }),
-  });
+  return connectBox(box).type(text);
 }
 
 export async function sendKey(id: string, key: string): Promise<unknown> {
   const box = await requireBox(id);
-  return boxJson(box, box.ports.exec, "/v1/cua/key", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ key }),
-  });
+  return connectBox(box).key(key);
 }
 
 export async function scroll(
@@ -329,9 +344,5 @@ export async function scroll(
   body: { x: number; y: number; dx: number; dy: number },
 ): Promise<unknown> {
   const box = await requireBox(id);
-  return boxJson(box, box.ports.exec, "/v1/cua/scroll", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  return connectBox(box).scroll(body.x, body.y, body.dx, body.dy);
 }
