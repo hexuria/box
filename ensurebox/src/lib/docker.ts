@@ -34,10 +34,11 @@ async function dockerRaw(args: string[]): Promise<{ stdout: string; stderr: stri
     return await run("docker", args);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    if (
-      /permission denied|cannot connect to the docker daemon|dial unix/i.test(message)
-    ) {
-      return run("sudo", ["-n", "docker", ...args]);
+    if (/permission denied|cannot connect to the docker daemon|dial unix|enoent|not found/i.test(message)) {
+      throw new DockerError(
+        "docker is not available as the current user. Add this account to the docker group and re-login, or point DOCKER_HOST at a reachable socket. EnsureBox does not fall back to sudo.",
+        message,
+      );
     }
     throw err;
   }
