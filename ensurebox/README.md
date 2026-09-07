@@ -1,14 +1,16 @@
-# EnsureBox — Grok Bot Layer 2
+# EnsureBox (demo)
 
-Control plane for [grok-box](https://github.com/hexuria/box). It creates Linux guests from the `grok-box` image, holds each box token, waits until the guest is ready, and exposes an HTTP API so L1 can run shell / files / Computer Use. It does not run models (that is L4) and it is not the sandboxed computer (that is L3).
+Sample orchestrator for [grok-box](https://github.com/hexuria/box). It is **not** a supported production control plane. The product is the guest image, CLI, and SDKs; this app shows one way to start a guest and proxy HTTP.
 
-The browser UI on this app is a **thin operator console**: ports, volumes, container identity, and lifecycle. It does not include shell, files, or CUA. Those belong in [`../l1`](../l1).
+EnsureBox creates Linux guests from the `grok-box` image, holds each box token, waits until the guest is ready, and exposes `/api/v1` so the L1 demo can run shell / files / Computer Use. Guest calls go through the TypeScript `grok-box` SDK (`connect(execUrl, hostUrl, token)`). This app does not run models.
 
-The guest image is unchanged: EnsureBox lives next to it, and is not copied into the Docker image.
+The browser UI is a **thin operator console**: ports, volumes, container identity, and lifecycle. It does not include shell, files, or CUA. Those belong in the L1 demo (`../l1`) or in your own client using the SDK directly.
+
+EnsureBox is not copied into the grok-box Docker image.
 
 ## Quick start
 
-From the **repository root**, build the L3 image if you do not already have it:
+From the **repository root**, build the guest image if you do not already have it:
 
 ```bash
 docker compose build
@@ -23,7 +25,7 @@ npm install
 npm run dev
 ```
 
-Open [http://127.0.0.1:43142](http://127.0.0.1:43142) to provision a guest, inspect host ports and volumes, and start or destroy it. Use the L1 client on [http://127.0.0.1:43141](http://127.0.0.1:43141) to work in the box.
+Open [http://127.0.0.1:43142](http://127.0.0.1:43142) to provision a guest, inspect host ports and volumes, and start or destroy it. Use the L1 demo on [http://127.0.0.1:43141](http://127.0.0.1:43141) to work in the box, or call the guest with the `grok-box` CLI / SDK using the published URLs and token **you** injected.
 
 If the Node process cannot talk to Docker, run:
 
@@ -40,11 +42,11 @@ sg docker -c 'npm run dev'
 | **Stop** | `docker stop`, keep container + volumes |
 | **Hibernate** | Stop and keep volumes (resume with **Start**) |
 | **Destroy** | `docker rm -f` and delete volumes |
-| **HTTP tools** | Proxy to guest `box-exec` with the stored `BOX_TOKEN` (for L1, not the operator UI) |
+| **HTTP tools** | TypeScript SDK → guest `box-exec` with the stored `BOX_TOKEN` (for L1 / API clients, not the operator UI) |
 
 Published guest ports are bound to `127.0.0.1`. Raw VNC (5900) and CDP (9222) stay inside the guest.
 
-## HTTP API (L1 wire)
+## HTTP API (demo L1 wire)
 
 Base: `http://127.0.0.1:43142`
 
@@ -60,13 +62,17 @@ Auth: `Authorization: Bearer <ENSUREBOX_TOKEN>` except `GET /api/v1/health`.
 | POST | `/api/v1/boxes/:id/start` |
 | POST | `/api/v1/boxes/:id/stop` |
 | POST | `/api/v1/boxes/:id/hibernate` |
-| POST | `/api/v1/boxes/:id/exec` body `{ "command": "echo ok" }` or argv |
-| GET, PUT | `/api/v1/boxes/:id/files` |
+| POST | `/api/v1/boxes/:id/exec` |
+| GET, PUT, DELETE | `/api/v1/boxes/:id/files` |
+| POST | `/api/v1/boxes/:id/files/mkdir` |
 | POST | `/api/v1/boxes/:id/cua/screenshot` |
-| POST | `/api/v1/boxes/:id/cua/click` `{x,y,button?}` |
-| POST | `/api/v1/boxes/:id/cua/type` `{text}` |
-| POST | `/api/v1/boxes/:id/cua/key` `{key}` |
-| POST | `/api/v1/boxes/:id/cua/scroll` `{x,y,dx,dy}` |
+| POST | `/api/v1/boxes/:id/cua/click` |
+| POST | `/api/v1/boxes/:id/cua/double-click` |
+| POST | `/api/v1/boxes/:id/cua/move` |
+| POST | `/api/v1/boxes/:id/cua/drag` |
+| POST | `/api/v1/boxes/:id/cua/type` |
+| POST | `/api/v1/boxes/:id/cua/key` |
+| POST | `/api/v1/boxes/:id/cua/scroll` |
 
 The operator console never sends the guest `BOX_TOKEN` to the browser. Responses omit it. VNC password is shown as a viewer password, not as a usable box credential.
 
