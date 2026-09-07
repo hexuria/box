@@ -56,8 +56,6 @@ impl AppState {
 #[derive(Serialize)]
 struct HealthResponse {
     status: &'static str,
-    service: &'static str,
-    version: &'static str,
 }
 
 #[derive(Serialize)]
@@ -105,6 +103,7 @@ struct Endpoints {
 
 pub fn app(state: AppState) -> Router {
     let protected = Router::new()
+        .route("/v1/ready", get(ready))
         .route("/v1/info", get(info))
         .route("/v1/desktop", get(desktop))
         .route("/v1/chrome", get(chrome))
@@ -112,7 +111,6 @@ pub fn app(state: AppState) -> Router {
 
     Router::new()
         .route("/v1/health", get(health))
-        .route("/v1/ready", get(ready))
         .merge(protected)
         .with_state(state)
 }
@@ -135,11 +133,7 @@ pub async fn serve(config: BoxConfig) -> Result<(), Box<dyn std::error::Error + 
 }
 
 async fn health() -> Json<HealthResponse> {
-    Json(HealthResponse {
-        status: "ok",
-        service: "box-host",
-        version: env!("CARGO_PKG_VERSION"),
-    })
+    Json(HealthResponse { status: "ok" })
 }
 
 async fn ready(State(state): State<AppState>) -> Result<Json<ReadyResponse>, ApiError> {
@@ -309,7 +303,44 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["service"], "box-host");
+        assert_eq!(body, serde_json::json!({ "status": "ok" }));
+        assert!(body.get("service").is_none());
+        assert!(body.get("version").is_none());
+    }
+
+    #[tokio::test]
+    async fn ready_rejects_missing_auth() {
+        let (status, body) = send(
+            Request::builder()
+                .uri("/v1/ready")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"]["code"], "unauthorized");
+    }
+
+    #[tokio::test]
+    async fn ready_with_token_reaches_probe() {
+        let (status, body) = send(
+            Request::builder()
+                .uri("/v1/ready")
+                .header("authorization", "Bearer host-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_ne!(status, StatusCode::UNAUTHORIZED);
+        assert!(
+            status == StatusCode::OK || status == StatusCode::SERVICE_UNAVAILABLE,
+            "ready with token should probe exec, got {status} {body}"
+        );
+        if status == StatusCode::OK {
+            assert_eq!(body["exec_ready"], true);
+        } else {
+            assert_eq!(body["error"]["code"], "not_ready");
+        }
     }
 
     #[tokio::test]
