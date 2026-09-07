@@ -259,6 +259,16 @@ drag="$(curl -fsS \
   "${EXEC_URL}/v1/cua/drag")"
 echo "${drag}" | grep -q '"ok":true'
 
+echo "==> POST /v1/cua/recipe (move + click in one call)"
+recipe="$(curl -fsS \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"smoke","screenshot":"none","steps":[{"op":"move","x":120,"y":120},{"op":"click","x":120,"y":120,"button":1},{"op":"wait","ms":10}]}' \
+  "${EXEC_URL}/v1/cua/recipe")"
+echo "${recipe}"
+echo "${recipe}" | grep -q '"ok":true'
+echo "${recipe}" | grep -q '"ran":3'
+
 echo "==> BOX_DESKTOP=0 still serves exec+host"
 "${COMPOSE[@]}" down --remove-orphans >/dev/null 2>&1 || true
 if [[ "${COMPOSE[0]}" == "sudo" ]]; then
