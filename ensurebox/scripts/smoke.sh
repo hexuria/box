@@ -159,5 +159,12 @@ curl -fsS \
   -d '{"x1":80,"y1":80,"x2":120,"y2":120}' \
   "${BASE}/api/v1/boxes/${id}/cua/drag" | grep -q '"ok":true'
 
+echo "==> POST cua/recipe"
+curl -fsS \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"screenshot":"none","steps":[{"op":"move","x":90,"y":90},{"op":"click","x":90,"y":90}]}' \
+  "${BASE}/api/v1/boxes/${id}/cua/recipe" | grep -q '"ok":true'
+
 echo
 echo "SMOKE OK"
