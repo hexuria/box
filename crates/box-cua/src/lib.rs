@@ -89,6 +89,21 @@ pub struct ScrollRequest {
     pub dy: i32,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct DragRequest {
+    pub x1: i32,
+    pub y1: i32,
+    pub x2: i32,
+    pub y2: i32,
+    pub button: Option<u8>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MoveRequest {
+    pub x: i32,
+    pub y: i32,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ScreenshotResponse {
     pub encoding: &'static str,
@@ -128,7 +143,7 @@ pub fn validate_point(config: &CuaConfig, x: i32, y: i32) -> Result<(), CuaError
     Ok(())
 }
 
-pub async fn screenshot(config: &CuaConfig) -> Result<ScreenshotResponse, CuaError> {
+pub async fn screenshot_png(config: &CuaConfig) -> Result<Vec<u8>, CuaError> {
     ensure_ready(config)?;
     let png = capture_png(&config.display).await?;
     if png.is_empty() {
@@ -137,6 +152,11 @@ pub async fn screenshot(config: &CuaConfig) -> Result<ScreenshotResponse, CuaErr
     if png.len() < 8 || &png[..8] != b"\x89PNG\r\n\x1a\n" {
         return Err(CuaError::Tool("screenshot was not a PNG".into()));
     }
+    Ok(png)
+}
+
+pub async fn screenshot(config: &CuaConfig) -> Result<ScreenshotResponse, CuaError> {
+    let png = screenshot_png(config).await?;
     Ok(ScreenshotResponse {
         encoding: "base64",
         mime: "image/png",
@@ -179,7 +199,7 @@ pub async fn type_text(config: &CuaConfig, req: &TypeRequest) -> Result<OkRespon
     }
     xdotool(
         config,
-        &["type", "--clearmodifiers", "--delay", "12", "--", &req.text],
+        &["type", "--clearmodifiers", "--delay", "1", "--", &req.text],
     )
     .await?;
     Ok(OkResponse { ok: true })
@@ -200,6 +220,80 @@ pub async fn key(config: &CuaConfig, req: &KeyRequest) -> Result<OkResponse, Cua
 pub async fn scroll(config: &CuaConfig, req: &ScrollRequest) -> Result<OkResponse, CuaError> {
     ensure_ready(config)?;
     validate_point(config, req.x, req.y)?;
+    if req.dx == 0 && req.dy == 0 {
+        return Err(CuaError::Invalid("dx and dy must not both be 0".into()));
+    }
+    // X buttons: 4=up, 5=down, 6=left, 7=right
+    let vertical = match req.dy.cmp(&0) {
+        std::cmp::Ordering::Greater => Some((5_u8, req.dy.unsigned_abs().min(50).max(1))),
+        std::cmp::Ordering::Less => Some((4_u8, req.dy.unsigned_abs().min(50).max(1))),
+        std::cmp::Ordering::Equal => None,
+    };
+    let horizontal = match req.dx.cmp(&0) {
+        std::cmp::Ordering::Greater => Some((7_u8, req.dx.unsigned_abs().min(50).max(1))),
+        std::cmp::Ordering::Less => Some((6_u8, req.dx.unsigned_abs().min(50).max(1))),
+        std::cmp::Ordering::Equal => None,
+    };
+
+    let mut args = vec![
+        "mousemove".into(),
+        "--sync".into(),
+        req.x.to_string(),
+        req.y.to_string(),
+    ];
+    if let Some((button, n)) = vertical {
+        args.extend([
+            "click".into(),
+            "--repeat".into(),
+            n.to_string(),
+            "--delay".into(),
+            "1".into(),
+            button.to_string(),
+        ]);
+    }
+    if let Some((button, n)) = horizontal {
+        args.extend([
+            "click".into(),
+            "--repeat".into(),
+            n.to_string(),
+            "--delay".into(),
+            "1".into(),
+            button.to_string(),
+        ]);
+    }
+    xdotool_owned(config, &args).await?;
+    Ok(OkResponse { ok: true })
+}
+
+pub async fn double_click(config: &CuaConfig, req: &ClickRequest) -> Result<OkResponse, CuaError> {
+    ensure_ready(config)?;
+    validate_point(config, req.x, req.y)?;
+    let button = req.button.unwrap_or(1);
+    if !(1..=7).contains(&button) {
+        return Err(CuaError::Invalid("button must be 1-7".into()));
+    }
+    xdotool(
+        config,
+        &[
+            "mousemove",
+            "--sync",
+            &req.x.to_string(),
+            &req.y.to_string(),
+            "click",
+            "--repeat",
+            "2",
+            "--delay",
+            "50",
+            &button.to_string(),
+        ],
+    )
+    .await?;
+    Ok(OkResponse { ok: true })
+}
+
+pub async fn move_pointer(config: &CuaConfig, req: &MoveRequest) -> Result<OkResponse, CuaError> {
+    ensure_ready(config)?;
+    validate_point(config, req.x, req.y)?;
     xdotool(
         config,
         &[
@@ -210,32 +304,35 @@ pub async fn scroll(config: &CuaConfig, req: &ScrollRequest) -> Result<OkRespons
         ],
     )
     .await?;
-    // X buttons: 4=up, 5=down, 6=left, 7=right
-    let vertical = match req.dy.cmp(&0) {
-        std::cmp::Ordering::Greater => 5,
-        std::cmp::Ordering::Less => 4,
-        std::cmp::Ordering::Equal => 0,
-    };
-    let horizontal = match req.dx.cmp(&0) {
-        std::cmp::Ordering::Greater => 7,
-        std::cmp::Ordering::Less => 6,
-        std::cmp::Ordering::Equal => 0,
-    };
-    let v_clicks = req.dy.unsigned_abs().min(50);
-    let h_clicks = req.dx.unsigned_abs().min(50);
-    if vertical != 0 {
-        for _ in 0..v_clicks.max(1) {
-            xdotool(config, &["click", &vertical.to_string()]).await?;
-        }
+    Ok(OkResponse { ok: true })
+}
+
+pub async fn drag(config: &CuaConfig, req: &DragRequest) -> Result<OkResponse, CuaError> {
+    ensure_ready(config)?;
+    validate_point(config, req.x1, req.y1)?;
+    validate_point(config, req.x2, req.y2)?;
+    let button = req.button.unwrap_or(1);
+    if !(1..=7).contains(&button) {
+        return Err(CuaError::Invalid("button must be 1-7".into()));
     }
-    if horizontal != 0 {
-        for _ in 0..h_clicks.max(1) {
-            xdotool(config, &["click", &horizontal.to_string()]).await?;
-        }
-    }
-    if vertical == 0 && horizontal == 0 {
-        return Err(CuaError::Invalid("dx and dy must not both be 0".into()));
-    }
+    xdotool(
+        config,
+        &[
+            "mousemove",
+            "--sync",
+            &req.x1.to_string(),
+            &req.y1.to_string(),
+            "mousedown",
+            &button.to_string(),
+            "mousemove",
+            "--sync",
+            &req.x2.to_string(),
+            &req.y2.to_string(),
+            "mouseup",
+            &button.to_string(),
+        ],
+    )
+    .await?;
     Ok(OkResponse { ok: true })
 }
 
@@ -317,6 +414,11 @@ async fn xdotool(config: &CuaConfig, args: &[&str]) -> Result<(), CuaError> {
         return Err(CuaError::Tool(format!("xdotool failed: {err}")));
     }
     Ok(())
+}
+
+async fn xdotool_owned(config: &CuaConfig, args: &[String]) -> Result<(), CuaError> {
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    xdotool(config, &refs).await
 }
 
 fn env_bool(var: &str, default: bool) -> bool {
