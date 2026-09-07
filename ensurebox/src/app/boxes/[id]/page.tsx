@@ -1,7 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { BoxLifecycleButtons } from "@/components/box-lifecycle-buttons";
-import { BoxTools } from "@/components/box-tools";
 import { Shell } from "@/components/shell";
 import { Badge } from "@/components/ui/badge";
 import { buttonVariants } from "@/components/ui/button";
@@ -12,9 +11,28 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { boxCapabilities, getPublicBox } from "@/lib/lifecycle";
+import { getPublicBox } from "@/lib/lifecycle";
 
 export const dynamic = "force-dynamic";
+
+function containerState(status: string) {
+  if (status === "ready" || status === "creating") {
+    return "running";
+  }
+  if (status === "stopped" || status === "hibernated") {
+    return "stopped";
+  }
+  return status;
+}
+
+function Field({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="grid gap-1 sm:grid-cols-[8rem_1fr] sm:items-start">
+      <dt className="text-zinc-500">{label}</dt>
+      <dd className="break-all font-mono text-xs sm:text-sm">{value}</dd>
+    </div>
+  );
+}
 
 export default async function BoxPage({
   params,
@@ -26,9 +44,6 @@ export default async function BoxPage({
   if (!box) {
     notFound();
   }
-  const capabilities =
-    box.status === "ready" ? await boxCapabilities(id) : null;
-  const toolsDisabled = box.status !== "ready";
 
   return (
     <Shell>
@@ -36,7 +51,7 @@ export default async function BoxPage({
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div>
             <Link href="/" className="text-sm text-zinc-500 hover:text-zinc-800">
-              ← All boxes
+              ← All guests
             </Link>
             <h1 className="mt-2 text-2xl font-semibold tracking-tight">{box.name}</h1>
             <p className="font-mono text-sm text-zinc-500">{box.id}</p>
@@ -65,65 +80,73 @@ export default async function BoxPage({
 
         <Card>
           <CardHeader>
-            <CardTitle>Endpoints</CardTitle>
+            <CardTitle>Container</CardTitle>
             <CardDescription>
-              L1 and operators talk to EnsureBox, not to these ports directly,
-              except the noVNC viewer.
+              Docker identity synced from inspect. The guest token stays on this
+              server.
             </CardDescription>
           </CardHeader>
-          <CardContent className="space-y-2 text-sm">
-            <p>
-              exec <span className="font-mono">{box.endpoints.exec}</span>
-            </p>
-            <p>
-              host <span className="font-mono">{box.endpoints.host}</span>
-            </p>
-            <p>
-              viewer{" "}
-              <a
-                className="font-mono text-primary underline-offset-2 hover:underline"
-                href={box.endpoints.viewer}
-                target="_blank"
-                rel="noreferrer"
-              >
-                {box.endpoints.viewer}
-              </a>
-            </p>
-            <p>
-              VNC password{" "}
-              <span className="font-mono">{box.vncPassword}</span>
-              <span className="text-zinc-500"> (first 8 of the box token)</span>
-            </p>
-            {capabilities ? (
-              <p className="pt-2 text-zinc-600">
-                capabilities:{" "}
-                {Object.entries(capabilities)
-                  .filter(([, on]) => on)
-                  .map(([name]) => name)
-                  .join(", ") || "none"}
-              </p>
-            ) : null}
+          <CardContent>
+            <dl className="space-y-3 text-sm">
+              <Field label="image" value={box.image} />
+              <Field label="name" value={box.containerName} />
+              <Field
+                label="id"
+                value={box.containerId ?? "none"}
+              />
+              <Field label="state" value={containerState(box.status)} />
+            </dl>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Volumes</CardTitle>
+            <CardDescription>
+              Host paths mounted into the guest. Hibernate keeps these; destroy
+              deletes them.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <dl className="space-y-3 text-sm">
+              <Field label="workspace" value={box.volumes.workspace} />
+              <Field label="chrome" value={box.volumes.chromeProfile} />
+            </dl>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Ports</CardTitle>
+            <CardDescription>
+              Published on this host. L1 must not call exec or host directly.
+              Operators may open the viewer.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3 text-sm">
+            <dl className="space-y-3">
+              <Field
+                label="exec"
+                value={`${box.endpoints.exec}  (:${box.ports.exec} → 1337)`}
+              />
+              <Field
+                label="host"
+                value={`${box.endpoints.host}  (:${box.ports.host} → 1340)`}
+              />
+              <Field
+                label="viewer"
+                value={`${box.endpoints.viewer}  (:${box.ports.novnc} → 6080)`}
+              />
+              <Field label="VNC password" value={box.vncPassword} />
+            </dl>
             <a
               className={buttonVariants({ variant: "outline" })}
               href={box.endpoints.viewer}
               target="_blank"
               rel="noreferrer"
             >
-              Open desktop
+              Open viewer
             </a>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Tools</CardTitle>
-            <CardDescription>
-              Routed through EnsureBox with the box token. Disabled unless the
-              guest is ready.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <BoxTools id={box.id} disabled={toolsDisabled} />
           </CardContent>
         </Card>
       </div>

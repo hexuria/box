@@ -15,7 +15,7 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "EnsureBox",
   description:
-    "Grok Bot Layer 2 control plane: create grok-box guests and route tools.",
+    "Grok Bot Layer 2 operator console: Docker guests, ports, volumes, lifecycle.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

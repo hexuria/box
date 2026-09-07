@@ -12,6 +12,14 @@ BASE="${ENSUREBOX_URL:-http://127.0.0.1:43142}"
 echo "==> GET /api/v1/health"
 curl -fsS "${BASE}/api/v1/health" | grep -q '"service":"ensurebox"'
 
+echo "==> operator console is not a tools UI"
+home_html="$(curl -fsS "${BASE}/")"
+echo "${home_html}" | grep -q "Operator console"
+if echo "${home_html}" | grep -q "Screenshot"; then
+  echo "EnsureBox home must not include CUA tools" >&2
+  exit 1
+fi
+
 echo "==> 401 without token"
 code="$(curl -s -o /dev/null -w '%{http_code}' "${BASE}/api/v1/boxes")"
 if [[ "${code}" != "401" ]]; then
@@ -48,6 +56,19 @@ cleanup() {
   curl -s -H "Authorization: Bearer ${TOKEN}" -X DELETE "${BASE}/api/v1/boxes/${id}" >/dev/null || true
 }
 trap cleanup EXIT
+
+echo "==> operator box page has inventory, not Shell/CUA"
+box_html="$(curl -fsS "${BASE}/boxes/${id}")"
+echo "${box_html}" | grep -q "Volumes"
+echo "${box_html}" | grep -q "VNC password"
+if echo "${box_html}" | grep -q "Screenshot"; then
+  echo "EnsureBox box page must not include CUA tools" >&2
+  exit 1
+fi
+if echo "${box_html}" | grep -q ">Shell<"; then
+  echo "EnsureBox box page must not include a Shell tab" >&2
+  exit 1
+fi
 
 echo "==> POST exec echo ok"
 out="$(curl -fsS \

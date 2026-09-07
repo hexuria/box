@@ -8,11 +8,11 @@ export function Shell({ children }: { children: React.ReactNode }) {
           <Link href="/" className="font-semibold tracking-tight">
             EnsureBox
             <span className="ml-2 text-sm font-normal text-zinc-500">
-              Grok Bot Layer 2
+              Operator console
             </span>
           </Link>
           <p className="text-sm text-zinc-500">
-            Creates grok-box guests. Holds tokens. Routes exec, files, and CUA.
+            Layer 2 control plane: Docker guests, ports, volumes, lifecycle.
           </p>
         </div>
       </header>
