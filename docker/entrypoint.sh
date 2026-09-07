@@ -165,6 +165,10 @@ start_chrome() {
   export DISPLAY="${BOX_DISPLAY}"
 
   echo "starting ${bin} on ${DISPLAY} profile=${BOX_CHROME_PROFILE} cdp=127.0.0.1:${BOX_CDP_PORT}"
+  # uid 1000 cannot use Chrome's setuid sandbox in this image. --no-sandbox stays.
+  # Do not pass --disable-setuid-sandbox: Chromium names that flag on the yellow
+  # infobar. managed policy + --test-type hide the remaining --no-sandbox warning
+  # so CUA screenshots are a usable desktop, not a banner.
   # Closing/crashing the browser must not take the box down — restart it.
   (
     while true; do
@@ -176,7 +180,10 @@ start_chrome() {
         --disable-gpu \
         --disable-software-rasterizer \
         --no-sandbox \
-        --disable-setuid-sandbox \
+        --test-type \
+        --hide-crash-restore-bubble \
+        --disable-session-crashed-bubble \
+        --disable-features=Translate \
         --window-size="${w},${h}" \
         --window-position=0,0 \
         --remote-debugging-address=127.0.0.1 \

@@ -33,12 +33,15 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 1000 --shell /bin/bash box \
     && mkdir -p /workspace /home/box/chrome-profile /home/box/.vnc /tmp/.X11-unix \
+        /etc/chromium/policies/managed /etc/opt/chrome/policies/managed \
     && chmod 1777 /tmp/.X11-unix \
     && chown -R box:box /workspace /home/box
 
 COPY --from=builder /src/target/release/box-exec /usr/local/bin/box-exec
 COPY --from=builder /src/target/release/box-host /usr/local/bin/box-host
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY docker/chromium-policies.json /etc/chromium/policies/managed/grok-box.json
+COPY docker/chromium-policies.json /etc/opt/chrome/policies/managed/grok-box.json
 RUN chmod 755 /usr/local/bin/entrypoint.sh /usr/local/bin/box-exec /usr/local/bin/box-host
 
 ENV WORKSPACE_ROOT=/workspace \
