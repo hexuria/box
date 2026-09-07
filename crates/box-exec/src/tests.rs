@@ -249,6 +249,10 @@ async fn cua_type_key_scroll_disabled() {
             "/v1/cua/drag",
             json!({"x1": 10, "y1": 10, "x2": 20, "y2": 20}),
         ),
+        (
+            "/v1/cua/recipe",
+            json!({"steps":[{"op":"move","x":10,"y":10}]}),
+        ),
     ] {
         let (status, body) = send(s.clone(), auth_json("POST", uri, "secret-token", payload)).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{uri}");
@@ -368,6 +372,46 @@ async fn exec_strips_box_token_from_child_env() {
     assert_eq!(body["exit_code"], 0);
     assert!(body["stdout"].as_str().unwrap().contains("STRIPPED"));
     assert!(!body["stdout"].as_str().unwrap().contains("LEAKED"));
+}
+
+#[tokio::test]
+async fn cua_recipe_rejects_empty_before_display() {
+    let dir = TempDir::new().unwrap();
+    let (status, body) = send(
+        state(&dir),
+        auth_json(
+            "POST",
+            "/v1/cua/recipe",
+            "secret-token",
+            json!({"steps": []}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_request");
+}
+
+#[tokio::test]
+async fn cua_recipe_rejects_out_of_range_before_run() {
+    let dir = TempDir::new().unwrap();
+    let (status, body) = send(
+        state(&dir),
+        auth_json(
+            "POST",
+            "/v1/cua/recipe",
+            "secret-token",
+            json!({
+                "screenshot": "none",
+                "steps": [
+                    {"op": "click", "x": 10, "y": 10},
+                    {"op": "click", "x": 1280, "y": 0}
+                ]
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "out_of_range");
 }
 
 #[tokio::test]
