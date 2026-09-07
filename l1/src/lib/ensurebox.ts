@@ -225,6 +225,35 @@ export async function sendKey(id: string, key: string): Promise<unknown> {
   });
 }
 
+export async function doubleClick(
+  id: string,
+  x: number,
+  y: number,
+  button = 1,
+): Promise<unknown> {
+  return request(`/api/v1/boxes/${id}/cua/double-click`, {
+    method: "POST",
+    body: JSON.stringify({ x, y, button }),
+  });
+}
+
+export async function movePointer(id: string, x: number, y: number): Promise<unknown> {
+  return request(`/api/v1/boxes/${id}/cua/move`, {
+    method: "POST",
+    body: JSON.stringify({ x, y }),
+  });
+}
+
+export async function drag(
+  id: string,
+  body: { x1: number; y1: number; x2: number; y2: number; button?: number },
+): Promise<unknown> {
+  return request(`/api/v1/boxes/${id}/cua/drag`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
 export async function scroll(
   id: string,
   body: { x: number; y: number; dx: number; dy: number },

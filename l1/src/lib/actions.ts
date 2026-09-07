@@ -161,10 +161,43 @@ export async function clickAction(
   id: string,
   x: number,
   y: number,
+  button = 1,
 ): Promise<{ error?: string; ok?: boolean }> {
   try {
     await requireL1Session();
-    await ensurebox.click(id, x, y, 1);
+    await ensurebox.click(id, x, y, button);
+    return { ok: true };
+  } catch (err) {
+    return fail(err);
+  }
+}
+
+export async function doubleClickAction(
+  id: string,
+  x: number,
+  y: number,
+  button = 1,
+): Promise<{ error?: string; ok?: boolean }> {
+  try {
+    await requireL1Session();
+    await ensurebox.doubleClick(id, x, y, button);
+    return { ok: true };
+  } catch (err) {
+    return fail(err);
+  }
+}
+
+export async function dragAction(
+  id: string,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  button = 1,
+): Promise<{ error?: string; ok?: boolean }> {
+  try {
+    await requireL1Session();
+    await ensurebox.drag(id, { x1, y1, x2, y2, button });
     return { ok: true };
   } catch (err) {
     return fail(err);
@@ -201,10 +234,12 @@ export async function scrollAction(
   id: string,
   dx: number,
   dy: number,
+  x = 640,
+  y = 400,
 ): Promise<{ error?: string; ok?: boolean }> {
   try {
     await requireL1Session();
-    await ensurebox.scroll(id, { x: 640, y: 400, dx, dy });
+    await ensurebox.scroll(id, { x, y, dx, dy });
     return { ok: true };
   } catch (err) {
     return fail(err);
