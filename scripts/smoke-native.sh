@@ -65,6 +65,6 @@ code="$(curl -s -o /dev/null -w '%{http_code}' \
 [[ "${code}" == "401" ]]
 
 curl -fsS -H "Authorization: Bearer ${TOKEN}" http://127.0.0.1:1340/v1/info \
-  | grep -q '"exec":true'
+  | grep -q '"scope":"container-local"'
 
 echo "NATIVE SMOKE OK"
