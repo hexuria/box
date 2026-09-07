@@ -40,7 +40,7 @@ Inside (see [`docs/ARCHITECTURE.md`](ARCHITECTURE.md)):
 - Xvfb **1280×800**, openbox, x11vnc (localhost **5900**), noVNC **6080**
 - Chromium; CDP on **127.0.0.1:9222** only — **never publish 9222 or 5900**
 
-Compose publishes **1337, 1340, 6080** as `1337:1337` (that is **0.0.0.0** on the VM). Healthcheck: `curl http://127.0.0.1:1340/v1/ready` (start period 25s, 5s interval, 12 retries). `shm_size` is **256mb**. Bind mounts: `./workspace-data:/workspace`, `./chrome-profile:/home/box/chrome-profile`.
+Compose publishes **1337, 1340, 6080** as `127.0.0.1:1337:1337` (loopback on the VM). Reach them with an SSH tunnel, Tailscale, or similar. Healthcheck: `curl -H "Authorization: Bearer $BOX_TOKEN" http://127.0.0.1:1340/v1/ready` (start period 25s, 5s interval, 12 retries). `shm_size` is **256mb**. Bind mounts: `./workspace-data:/workspace`, `./chrome-profile:/home/box/chrome-profile`.
 
 `BOX_CORS_ORIGINS` is an explicit allowlist (`*` is ignored). Compose does **not** currently pass that env into the container; laptop CLI/SDK does not need CORS. Leave it unset unless a **browser** will call the guest directly (unusual — L1 talks to EnsureBox, not to 1337).
 
@@ -111,17 +111,17 @@ This guest is **RAM-heavy**: Debian + Xvfb + openbox + Chromium + two Rust daemo
 
 | Port | Publish? | Role |
 | --- | --- | --- |
-| **1337** | Compose yes (`0.0.0.0`) | `box-exec` — Bearer `BOX_TOKEN` except `GET /v1/health` |
-| **1340** | Compose yes | `box-host` — Bearer except `GET /v1/health` and `GET /v1/ready` |
-| **6080** | Compose yes | noVNC `/vnc.html` — **not** Bearer; VNC password is **first 8 characters of `BOX_TOKEN`** (or `BOX_VNC_PASSWORD`) |
+| **1337** | Compose yes (`127.0.0.1`) | `box-exec` — Bearer `BOX_TOKEN` except `GET /v1/health` |
+| **1340** | Compose yes (`127.0.0.1`) | `box-host` — Bearer except `GET /v1/health`. **`GET /v1/ready` requires Bearer.** |
+| **6080** | Compose yes (`127.0.0.1`) | noVNC `/vnc.html` — **not** Bearer; VNC password is `BOX_VNC_PASSWORD` (x11vnc 8-char max) |
 | 5900 | **no** | x11vnc, `127.0.0.1` inside the container |
 | 9222 | **no** | Chromium CDP, `127.0.0.1` only |
 
-`BOX_TOKEN` is bearer auth. It is **not** a substitute for TLS. Do **not** expose exec/host as raw HTTP on a public IP.
+`BOX_TOKEN` is bearer auth. It is **not** a substitute for TLS. Do **not** expose exec/host as raw HTTP on a public IP. Compose fails if `BOX_TOKEN` or `BOX_VNC_PASSWORD` is unset.
 
-Health and ready are **unauthenticated**. If those ports are on the internet, anyone can fingerprint the box even without the token.
+Health is **unauthenticated** and returns only `{"status":"ok"}`. Ready requires Bearer.
 
-noVNC is a **full desktop session** (keyboard/mouse on 1280×800). Treat **6080** like a KVM. The VNC password is truncated to **8 chars** (x11vnc). A strong `BOX_TOKEN` does **not** give you a strong VNC password unless you set a dedicated `BOX_VNC_PASSWORD` (still 8 chars effective). Another reason to keep 6080 off the public internet.
+noVNC is a **full desktop session** (keyboard/mouse on 1280×800). Treat **6080** like a KVM. The VNC password is truncated to **8 chars** (x11vnc) and is **independent of `BOX_TOKEN`**. Keep 6080 off the public internet; loopback publish is the default.
 
 ### Two network modes
 
@@ -141,12 +141,12 @@ noVNC is a **full desktop session** (keyboard/mouse on 1280×800). Treat **6080*
     ```
 
     CLI uses `http://127.0.0.1:1337` and `http://127.0.0.1:1340`.
-  - **Tailscale** (or WireGuard): install on the VM + laptop. Point the CLI at `http://<tailscale-100.x>:1337`. Cloud Firewall still blocks the **public** NIC. Tailscale may fall back to DERP if UDP **41641** is not open — that is fine for a test.
+  - **Tailscale** (or WireGuard): install on the VM + laptop. Point the CLI at `http://\u003ctailscale-100.x\u003e:1337`. Cloud Firewall still blocks the **public** NIC. Tailscale may fall back to DERP if UDP **41641** is not open — that is fine for a test.
 
-Compose publishes `0.0.0.0`. **Firewall is mandatory** even for a “private” test: Akamai gives the VM a **public IPv4** (and usually IPv6). Binding Compose to loopback is extra defense:
+Compose publishes `127.0.0.1`. **Firewall is still wise** even for a “private” test: Akamai gives the VM a **public IPv4** (and usually IPv6). Loopback publish is now the default in this repo:
 
 ```yaml
-# compose override — private test
+# docker-compose.yml (this tree)
 services:
   box:
     ports:
@@ -188,7 +188,7 @@ IP-only HTTP on `:1337` is not an acceptable “public” mode.
 
 ### Firewall philosophy
 
-Default-deny. SSH keys, not passwords. Unattended-upgrades on Ubuntu. Cloud Firewalls on Akamai are **free** and sit in front of the VM ([docs](https://techdocs.akamai.com/cloud-computing/docs/cloud-firewall)). Still keep `ufw` or nftables if you want defense in depth; the Cloud Firewall is the one that matters when Docker publishes `0.0.0.0`.
+Default-deny. SSH keys, not passwords. Unattended-upgrades on Ubuntu. Cloud Firewalls on Akamai are **free** and sit in front of the VM ([docs](https://techdocs.akamai.com/cloud-computing/docs/cloud-firewall)). Still keep `ufw` or nftables if you want defense in depth. Compose now publishes loopback; a Cloud Firewall is still the right default-deny for SSH.
 
 ---
 
@@ -222,9 +222,11 @@ Akamai Cloud Compute **is** Linode. The OpenTofu/Terraform provider for **VMs** 
    git clone https://github.com/hexuria/box.git
    cd box
    umask 077
-   openssl rand -base64 32 > /tmp/box-token
-   cat > .env <<EOF
+   openssl rand -base64 32 \u003e /tmp/box-token
+   BOX_VNC_PASSWORD=$(openssl rand -base64 12 | tr -dc 'A-Za-z0-9' | head -c 8)
+   cat \u003e .env \u003c\u003cEOF
    BOX_TOKEN=$(cat /tmp/box-token)
+   BOX_VNC_PASSWORD=${BOX_VNC_PASSWORD}
    BOX_ID=akamai-test
    BOX_DESKTOP=1
    BOX_DESKTOP_REQUIRED=1
@@ -236,7 +238,7 @@ Akamai Cloud Compute **is** Linode. The OpenTofu/Terraform provider for **VMs** 
    sudo chown -R 1000:1000 workspace-data chrome-profile
    docker compose up --build -d
    docker compose ps
-   curl -fsS http://127.0.0.1:1340/v1/ready
+   curl -fsS -H "Authorization: Bearer $(grep ^BOX_TOKEN= .env | cut -d= -f2-)" http://127.0.0.1:1340/v1/ready
    ```
 
    If the GitHub repo is private, use a deploy key or `scp` the tree instead of a plaintext PAT in `git clone`.
@@ -270,7 +272,7 @@ runcmd:
   - chown -R 1000:1000 /opt/grok-box/workspace-data /opt/grok-box/chrome-profile
   - |
       echo "Clone done. SSH in, write /opt/grok-box/.env with BOX_TOKEN, then:"
-      echo "  cd /opt/grok-box && docker compose up --build -d"
+      echo "  cd /opt/grok-box \u0026\u0026 docker compose up --build -d"
 ```
 
 Pass this as Metadata `user_data` (API wants **base64**). Then SSH, write `.env`, compose up. Unattended “clone + compose up” is possible if you inject the token via a secret mount later; do not bake it into the StackScript body (visible via API).
@@ -281,7 +283,7 @@ Pass this as Metadata `user_data` (API wants **base64**). Then SSH, write `.env`
 
 **When:** after the manual VM works, so you can recreate/destroy cleanly. **Do not start here** for the first “does Chromium even fit” test.
 
-**OpenTofu** is the OSS default. Terraform is equivalent for this (same HCL). Pin `linode/linode` v3 (`~> 3.0`). Auth: `export LINODE_TOKEN=…` on **your** machine. Local state is OK for a personal test (`terraform.tfstate` has IPs, not the Linode token if you used the env var — still do not commit state). Never put tokens in `*.tfvars` committed to git.
+**OpenTofu** is the OSS default. Terraform is equivalent for this (same HCL). Pin `linode/linode` v3 (`~\u003e 3.0`). Auth: `export LINODE_TOKEN=…` on **your** machine. Local state is OK for a personal test (`terraform.tfstate` has IPs, not the Linode token if you used the env var — still do not commit state). Never put tokens in `*.tfvars` committed to git.
 
 This pass does **not** ship a full module. Resource list for Akamai:
 
@@ -290,7 +292,7 @@ This pass does **not** ship a full module. Resource list for Akamai:
 | `linode_instance` | `image = "linode/ubuntu24.04"`, `type = "g6-standard-4"`, `region = var.region`, `authorized_keys = [var.ssh_public_key]`, `metadata { user_data = base64encode(file("cloud-init.yaml")) }`. Avoid `root_pass` if keys suffice. |
 | `linode_firewall` | `inbound_policy = "DROP"`, `outbound_policy = "ACCEPT"`, allow TCP 22 (and 443 only if you later go public). Cover **ipv4 and ipv6**. Attach with `linodes = [linode_instance.box.id]` (or `linode_firewall_device`). |
 | `linode_domain` / `linode_domain_record` | Optional, public HTTPS only. |
-| Outputs | IPv4, IPv6, `ssh root@…`, suggested `-L` tunnel command. |
+| Outputs | IPv4, IPv6, `ssh root@\u2026`, suggested `-L` tunnel command. |
 
 Sketch (not a maintained module — check [registry.terraform.io/providers/linode/linode](https://registry.terraform.io/providers/linode/linode/latest/docs) before apply):
 
@@ -299,7 +301,7 @@ terraform {
   required_providers {
     linode = {
       source  = "linode/linode"
-      version = "~> 3.0"
+      version = "~\u003e 3.0"
     }
   }
 }
@@ -344,7 +346,7 @@ output "tunnel" {
 **Other clouds — copy Compose + cloud-init, swap the VM resource:**
 
 | Cloud | VM | Firewall | Image / bootstrap |
-| --- | --- | --- | --- |
+| --- | --- | --- |
 | **AWS** | One **EC2** `t3.large` (2 vCPU / 8 GB) or `t3.xlarge` if the build is tight. No ALB for the first test. | **Security group**: 22 (your IP), later 443. Not 1337/1340/6080. | Ubuntu 24.04 AMI (Canonical). Same cloud-init as `user_data`. Provider `hashicorp/aws`. |
 | **GCP** | One **Compute Engine** `e2-standard-2` (2 vCPU / 8 GB). | VPC firewall **tags**: `allow-ssh`, later `allow-https`. | `ubuntu-2404-lts`. `metadata.startup-script`. Provider `hashicorp/google`. |
 | **Azure** | One VM **Standard_D2s_v5** or **Standard_B2ms** (~8 GB). | **NSG**: 22, later 443. | Ubuntu 24.04 LTS. Custom data = cloud-init. Provider `hashicorp/azurerm`. |
@@ -371,7 +373,7 @@ EnsureBox is a **host Docker** orchestrator (it `docker run`s guests). It does n
 
 Build on a beefy machine or CI, push to **GHCR** (Akamai has **no** first-class managed container registry like ECR — use GHCR, or ECR/GCR/ACR on those clouds). VM only `docker compose pull` / `docker run`.
 
-Until that exists, `git clone && docker compose up --build` is the path.
+Until that exists, `git clone \u0026\u0026 docker compose up --build` is the path.
 
 ---
 
@@ -384,7 +386,7 @@ After the Akamai VM is up and Compose is healthy:
    ```bash
    curl -fsS http://127.0.0.1:1337/v1/health
    curl -fsS http://127.0.0.1:1340/v1/health
-   curl -fsS http://127.0.0.1:1340/v1/ready
+   curl -fsS -H "Authorization: Bearer $GROK_BOX_TOKEN" http://127.0.0.1:1340/v1/ready
    ```
 
    Ready is **200** when exec is up and (with `BOX_DESKTOP_REQUIRED=1`) Xvfb is up. Chrome is **not** on the ready path — give Chromium a few more seconds before screenshots look interesting.
@@ -414,7 +416,7 @@ After the Akamai VM is up and Compose is healthy:
 
    TypeScript / Python: `GrokBox.connect(execUrl, hostUrl, token)` — same three values. No docker helper.
 
-4. **Optional noVNC:** [http://127.0.0.1:6080/vnc.html](http://127.0.0.1:6080/vnc.html) through the tunnel. Password = first **8** characters of `BOX_TOKEN` (unless `BOX_VNC_PASSWORD`).
+4. **Optional noVNC:** [http://127.0.0.1:6080/vnc.html](http://127.0.0.1:6080/vnc.html) through the tunnel. Password = `BOX_VNC_PASSWORD` (first **8** characters). Not Bearer-authenticated.
 
 **It works when:** `echo ok` returns exit 0, file put/get round-trips, screenshot writes a PNG of the 1280×800 desktop.
 
@@ -422,15 +424,15 @@ After the Akamai VM is up and Compose is healthy:
 
 ## G. Security and ops
 
-- **Rotate `BOX_TOKEN`:** recreate the container with a new env value (`docker compose up -d --force-recreate`). Update the laptop env. Changing the token changes the default VNC password (first 8 chars) unless `BOX_VNC_PASSWORD` is set.
-- **Do not log tokens.** Do not put them in Compose `docker compose config` pastebins, CI logs, or L1. Exec children already strip `BOX_TOKEN`, `BOX_HOST_TOKEN`, and `BOX_VNC_PASSWORD`.
-- Guest **must not** leak `BOX_TOKEN` to L1. L1 smoke asserts the L1 source never mentions it.
+- **Rotate `BOX_TOKEN`:** recreate the container with a new env value (`docker compose up -d --force-recreate`). Update the laptop env. Rotate `BOX_VNC_PASSWORD` the same way; it is independent of the bearer.
+- **Do not log tokens.** Do not put them in Compose `docker compose config` pastebins, CI logs, or L1. Daemons wipe `BOX_TOKEN`, `BOX_HOST_TOKEN`, and `BOX_VNC_PASSWORD` from their own environ after load. Exec children are stripped too.
+- Guest **must not** leak `BOX_TOKEN` to L1. L1 smoke asserts the L1 source never mentions it, `vncPassword`, or raw 6080 password UI.
 - SSH **keys**, not passwords. `PermitRootLogin prohibit-password`. `unattended-upgrades`.
 - **Disk:** `workspace-data` is **your** files. `chrome-profile` is cookies/session for uid **1000**. Bind mounts created as root are not writable by `box` until `chown 1000:1000`. Back up the workspace volume if you care; the image is rebuildable.
 - **Cost:** an idle VM still bills. Power off or `tofu destroy` / Cloud Manager delete when done. Hourly on 8 GB Shared is on the order of **seven cents**. A forgotten month is **~$48**.
 - **CORS:** default is no browser origins. Do not point a random website at 1337.
 - **CDP unpublished.** Do not add `9222:9222` to Compose.
-- Path 2 demos: EnsureBox token (`ENSUREBOX_TOKEN`) is **not** `BOX_TOKEN`. npm scripts bind L1/EnsureBox to **127.0.0.1** — put Caddy on the same VM. EnsureBox needs **host Docker** (it `docker run`s guests). Its viewer URLs are hardcoded `http://127.0.0.1:<novnc>/vnc.html`, so remote browsers need a tunnel or extra proxy work. Another reason path 2 is later.
+- Path 2 demos: EnsureBox token (`ENSUREBOX_TOKEN`) is **not** `BOX_TOKEN`. npm scripts bind L1/EnsureBox to **127.0.0.1**. Both demos require login tokens (`ENSUREBOX_TOKEN` / `L1_TOKEN`). EnsureBox needs **host Docker** as the current user (no sudo fallback). Operator viewer URLs are loopback noVNC; L1 does not receive them.
 
 ---
 
@@ -450,7 +452,7 @@ After the Akamai VM is up and Compose is healthy:
 - **Image build time on the VM.** First `docker compose up --build` compiles Rust in `rust:1.85-bookworm` and apt-installs Chromium. Expect a long first boot. A small VM makes this worse; 8 GB / 4 vCPU is the mitigation.
 - **Chromium RAM.** One desktop guest is the design point. Two guests on one 8 GB VM (EnsureBox spawning extras) will hurt.
 - **IPv6.** Akamai assigns it. Cloud Firewall must DROP v6 too, or you published the box on v6 while locking v4.
-- **Compose publishes `0.0.0.0`.** Public IP + no Cloud Firewall = the world can hit 1337/1340/6080. Health is open; noVNC is a desktop. Firewall is not optional.
+- **Compose publishes loopback.** `127.0.0.1:1337:1337` (and 1340/6080). Tailscale-to-public-NIC still will not hit those ports; use an SSH tunnel (including over Tailscale SSH). Health is open but minimal; noVNC is a desktop on loopback.
 - **Desktop vs `BOX_DESKTOP=0`.** If you only need exec/files, turn desktop off (`BOX_DESKTOP=0`, `BOX_DESKTOP_REQUIRED=0`). Ready no longer waits on X. No screenshots, no noVNC. Less RAM. Compose still lists 6080 unless you override ports.
 - **Volume ownership.** uid **1000** must own bind mounts.
 - **No registry.** First test builds from git. Plan a GHCR push before you scale to many VMs.
