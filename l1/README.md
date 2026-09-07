@@ -45,6 +45,8 @@ Auth: pages and server actions require `L1_TOKEN` (httpOnly cookie after login).
 
 Desktop is screenshots through EnsureBox CUA. L1 does not link guest noVNC ports or show a VNC password.
 
+The Recipe tab runs a multi-step CUA plan as one HTTP call through EnsureBox (`POST /api/v1/boxes/:id/cua/recipe`). The browser never talks to the guest. The guest image must include that route: rebuild with `docker compose build` or EnsureBox create will start an old `grok-box:local` without `/v1/cua/recipe`.
+
 ## Environment
 
 | Variable | Default | Meaning |

@@ -54,9 +54,41 @@ export type FileResult = {
 };
 
 export type ScreenshotResult = {
+  encoding?: string;
+  mime?: string;
   png_base64?: string;
   width?: number;
   height?: number;
+  bytes?: number;
+};
+
+export type RecipeScreenshotMode = "none" | "end" | "each";
+
+export type RecipeRequest = {
+  name?: string;
+  stop_on_error?: boolean;
+  screenshot?: RecipeScreenshotMode;
+  steps: unknown[];
+};
+
+export type RecipeStepResult = {
+  index?: number;
+  op?: string;
+  ok?: boolean;
+  ms?: number;
+  error?: string;
+  screenshot?: ScreenshotResult;
+};
+
+/** Guest `POST /v1/cua/recipe` receipt (optional screenshot PNG on the body or a step). */
+export type RecipeReceipt = {
+  ok?: boolean;
+  name?: string;
+  ran?: number;
+  stopped_at?: number;
+  duration_ms?: number;
+  steps?: RecipeStepResult[];
+  screenshot?: ScreenshotResult;
 };
 
 export type EnsureboxErrorBody = {
