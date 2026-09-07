@@ -120,7 +120,7 @@ cd l1 && cp .env.example .env && npm install && npm run dev          # human wor
 ## Ports
 
 | Port | Published? | Process | Notes |
-| --- | --- | --- |
+| --- | --- | --- | --- |
 | **1337** | host `127.0.0.1` | `box-exec` | exec, files, CUA. Process bind inside the image is `0.0.0.0`. |
 | **1340** | host `127.0.0.1` | `box-host` | health, ready, info, desktop, chrome. |
 | **6080** | host `127.0.0.1` | websockify / noVNC | Viewer. **Not** Bearer-authenticated. |
