@@ -242,9 +242,177 @@ async fn cua_type_key_scroll_disabled() {
             "/v1/cua/scroll",
             json!({"x": 10, "y": 10, "dx": 0, "dy": 1}),
         ),
+        ("/v1/cua/double-click", json!({"x": 10, "y": 10})),
+        ("/v1/cua/move", json!({"x": 10, "y": 10})),
+        (
+            "/v1/cua/drag",
+            json!({"x1": 10, "y1": 10, "x2": 20, "y2": 20}),
+        ),
     ] {
         let (status, body) = send(s.clone(), auth_json("POST", uri, "secret-token", payload)).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{uri}");
         assert_eq!(body["error"]["code"], "cua_disabled", "{uri}");
     }
+}
+
+#[tokio::test]
+async fn cua_screenshot_png_query_still_json_error_when_disabled() {
+    let dir = TempDir::new().unwrap();
+    let (status, body) = send(
+        state(&dir),
+        Request::builder()
+            .method("POST")
+            .uri("/v1/cua/screenshot?format=png")
+            .header("authorization", "Bearer secret-token")
+            .header("accept", "image/png")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"]["code"], "cua_disabled");
+}
+
+#[tokio::test]
+async fn files_mkdir_and_delete() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir);
+    let (status, body) = send(
+        s.clone(),
+        auth_json(
+            "POST",
+            "/v1/files/mkdir",
+            "secret-token",
+            json!({"path": "notes/sub", "parents": true}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["created"], true);
+
+    let (status, body) = send(
+        s.clone(),
+        auth_json(
+            "PUT",
+            "/v1/files",
+            "secret-token",
+            json!({"path": "notes/sub/a.txt", "content": "x"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["bytes_written"], 1);
+
+    let (status, body) = send(
+        s.clone(),
+        Request::builder()
+            .method("DELETE")
+            .uri("/v1/files?path=notes/sub/a.txt")
+            .header("authorization", "Bearer secret-token")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["deleted"], true);
+
+    let (status, body) = send(
+        s,
+        Request::builder()
+            .method("DELETE")
+            .uri("/v1/files?path=notes/sub&recursive=true")
+            .header("authorization", "Bearer secret-token")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["deleted"], true);
+}
+
+#[tokio::test]
+async fn files_delete_rejects_root() {
+    let dir = TempDir::new().unwrap();
+    let (status, body) = send(
+        state(&dir),
+        Request::builder()
+            .method("DELETE")
+            .uri("/v1/files?path=")
+            .header("authorization", "Bearer secret-token")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_request");
+}
+
+#[tokio::test]
+async fn exec_strips_box_token_from_child_env() {
+    let dir = TempDir::new().unwrap();
+    let (status, body) = send(
+        state(&dir),
+        auth_json(
+            "POST",
+            "/v1/exec",
+            "secret-token",
+            json!({
+                "command": ["sh", "-c", r#"if [ -n "${BOX_TOKEN+x}" ]; then echo LEAKED; else echo STRIPPED; fi"#],
+                "env": {"BOX_TOKEN": "injected-secret"}
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["exit_code"], 0);
+    assert!(body["stdout"].as_str().unwrap().contains("STRIPPED"));
+    assert!(!body["stdout"].as_str().unwrap().contains("LEAKED"));
+}
+
+#[tokio::test]
+async fn exec_closes_stdin_so_cat_exits() {
+    let dir = TempDir::new().unwrap();
+    let (status, body) = send(
+        state(&dir),
+        auth_json(
+            "POST",
+            "/v1/exec",
+            "secret-token",
+            json!({
+                "command": ["cat"],
+                "stdin": "from-stdin\n",
+                "timeout_ms": 2000
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["timed_out"], false);
+    assert_eq!(body["exit_code"], 0);
+    assert!(body["stdout"].as_str().unwrap().contains("from-stdin"));
+}
+
+#[tokio::test]
+async fn exec_timeout_keeps_stdout() {
+    let dir = TempDir::new().unwrap();
+    let (status, body) = send(
+        state(&dir),
+        auth_json(
+            "POST",
+            "/v1/exec",
+            "secret-token",
+            json!({
+                "command": ["sh", "-c", "echo hello >.timeout-out; cat .timeout-out; sleep 30"],
+                "timeout_ms": 500
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["timed_out"], true);
+    assert!(body["exit_code"].is_null());
+    assert!(
+        body["stdout"].as_str().unwrap().contains("hello"),
+        "timeout discarded stdout: {body}"
+    );
 }
