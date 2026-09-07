@@ -57,18 +57,19 @@ Full list: [TERMINOLOGY.md](TERMINOLOGY.md).
 | 5900 | x11vnc | RFB on **localhost only** (`BOX_VNC_BIND`). Not published. |
 | 9222 | Chromium CDP | **localhost only**. Not published. |
 
-Bind addresses: `BOX_EXEC_BIND` / `BOX_HOST_BIND` (default `0.0.0.0:1337` and `0.0.0.0:1340`).
+Bind addresses: inside the guest image, `BOX_EXEC_BIND` / `BOX_HOST_BIND` default to `0.0.0.0` so Compose port-map works. Native/cargo defaults are `127.0.0.1`. Compose **host** publish is `127.0.0.1:1337` (etc.).
 
 ## Auth model
 
-- **Shared secret:** `BOX_TOKEN`. Whoever starts the guest injects it.
-- **Optional split:** `BOX_HOST_TOKEN` for `box-host` `/v1/info`, `/v1/desktop`, `/v1/chrome`. If unset or empty, `box-host` uses `BOX_TOKEN`.
+- **Shared secret:** `BOX_TOKEN`. Whoever starts the guest injects it. Required; no silent default.
+- **Optional split:** `BOX_HOST_TOKEN` for `box-host` `/v1/info`, `/v1/desktop`, `/v1/chrome`, `/v1/ready`. If unset or empty, `box-host` uses `BOX_TOKEN`.
 - **Header:** `Authorization: Bearer <token>`. Comparison is constant-time on equal-length tokens.
-- **Unauthenticated:** `/v1/health` on both daemons, and `/v1/ready` on `box-host`.
-- **Authenticated:** everything else, including file I/O, CUA, and `/v1/info`.
-- **Docker:** the entrypoint exits if `BOX_TOKEN` is missing. Local `cargo run` falls back to `dev-box-token` and logs a warning.
+- **Unauthenticated:** `GET /v1/health` on both daemons (`{"status":"ok"}` only).
+- **Authenticated:** everything else, including `/v1/ready`, file I/O, CUA, and `/v1/info`.
+- **Insecure tokens:** `dev-box-token`, empty, or shorter than 16 characters are rejected unless `BOX_ALLOW_INSECURE_DEV=1` **and** both daemon binds are loopback.
+- **Docker:** the entrypoint exits if `BOX_TOKEN` is missing. After spawn it unsets secrets from the entrypoint shell. Daemons wipe those vars from their own environ after load.
 - **Exec children:** `BOX_TOKEN`, `BOX_HOST_TOKEN`, and `BOX_VNC_PASSWORD` are stripped from the child environment.
-- **Viewer:** noVNC is not Bearer-authenticated. x11vnc uses a VNC password (first 8 characters of `BOX_TOKEN`, or `BOX_VNC_PASSWORD`).
+- **Viewer:** noVNC is not Bearer-authenticated. x11vnc uses `BOX_VNC_PASSWORD` (first 8 characters). Independent of `BOX_TOKEN`. Host publish is loopback.
 - **CORS:** default is no browser origins. Set `BOX_CORS_ORIGINS` to an explicit comma-separated list if a browser must call the guest. `*` is ignored.
 
 WebSocket streaming for exec is **not** in this tree. Use `POST /v1/exec` (bounded output, timeout; stdout/stderr are kept on timeout).
@@ -99,7 +100,7 @@ If `box-exec` or `box-host` (or the X/VNC stack) dies, the entrypoint stops sibl
 
 Runtime user is `box` (uid 1000), not root. Ports are unprivileged.
 
-`GET /v1/ready` is 200 when exec health succeeds, and when `BOX_DESKTOP_REQUIRED=1` the X display probe must also succeed. Chrome is **not** on the ready path. Compose healthcheck hits `/v1/ready`.
+`GET /v1/ready` is 200 when exec health succeeds, and when `BOX_DESKTOP_REQUIRED=1` the X display probe must also succeed. Chrome is **not** on the ready path. Compose healthcheck hits `/v1/ready` with `Authorization: Bearer`.
 
 `GET /v1/info` `capabilities`:
 
