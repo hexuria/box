@@ -5,7 +5,9 @@
 //! Chrome DevTools Protocol listens on **localhost only**.
 
 use serde::{Deserialize, Serialize};
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Default Chromium `--user-data-dir`.
 pub const DEFAULT_PROFILE: &str = "/home/box/chrome-profile";
@@ -77,7 +79,9 @@ pub fn probe_chrome(cfg: &ChromeConfig) -> ChromeStatus {
             display: cfg.display.clone(),
         };
     }
-    let running = pidfile_alive(Path::new(PID_FILE)) || chromium_on_display(&cfg.display);
+    let running = pidfile_alive(Path::new(PID_FILE))
+        || cdp_listening(cfg.cdp_port)
+        || chromium_on_display(&cfg.display);
     ChromeStatus {
         enabled: true,
         running,
@@ -94,11 +98,26 @@ fn pidfile_alive(path: &Path) -> bool {
     let Ok(pid) = raw.trim().parse::<u32>() else {
         return false;
     };
-    Path::new(&format!("/proc/{pid}")).exists()
+    Path::new(&format!("/proc/{pid}")).exists() && is_chrome_pid(pid)
 }
 
-/// Fallback when the pidfile is missing: look for a chromium/chrome cmdline
-/// that mentions the configured DISPLAY.
+fn is_chrome_pid(pid: u32) -> bool {
+    looks_like_chrome(
+        &read_comm(&pid.to_string()),
+        &read_exe(&pid.to_string()),
+        &read_cmdline(&pid.to_string()),
+    ) && !is_chrome_helper(
+        &read_comm(&pid.to_string()),
+        &read_cmdline(&pid.to_string()),
+    )
+}
+
+fn cdp_listening(port: u16) -> bool {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    TcpStream::connect_timeout(&addr, Duration::from_millis(150)).is_ok()
+}
+
+/// Look for a chromium/chrome process. DISPLAY may live in environ rather than argv.
 fn chromium_on_display(display: &str) -> bool {
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return false;
@@ -109,21 +128,95 @@ fn chromium_on_display(display: &str) -> bool {
         if !pid.chars().all(|c| c.is_ascii_digit()) {
             continue;
         }
-        let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
-        let text = String::from_utf8_lossy(&cmdline);
-        let is_chrome = text.contains("chromium") || text.contains("chrome");
-        if is_chrome && (text.contains(display) || display_env_matches(pid.as_ref(), display)) {
+        let comm = read_comm(pid.as_ref());
+        let exe = read_exe(pid.as_ref());
+        let cmdline = read_cmdline(pid.as_ref());
+        if !looks_like_chrome(&comm, &exe, &cmdline) {
+            continue;
+        }
+        if is_chrome_helper(&comm, &cmdline) {
+            continue;
+        }
+        if display_env_matches(pid.as_ref(), display)
+            || cmdline.contains(display)
+            || cmdline.contains("--remote-debugging-port")
+            || cmdline.contains("--user-data-dir")
+        {
+            return true;
+        }
+        // A chrome/chromium browser process on this box is enough.
+        if comm_is_browser(&comm) || exe_is_browser(&exe) {
             return true;
         }
     }
     false
 }
 
+fn read_comm(pid: &str) -> String {
+    std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default()
+}
+
+fn read_exe(pid: &str) -> String {
+    std::fs::read_link(format!("/proc/{pid}/exe"))
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+fn read_cmdline(pid: &str) -> String {
+    let raw = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+    String::from_utf8_lossy(&raw).into_owned()
+}
+
+fn comm_is_browser(comm: &str) -> bool {
+    let comm = comm.trim();
+    matches!(
+        comm,
+        "chrome" | "chromium" | "chromium-browse" | "google-chrome" | "chrome-headless"
+    )
+}
+
+fn exe_is_browser(exe: &str) -> bool {
+    let exe = exe.to_ascii_lowercase();
+    (exe.contains("chromium") || exe.contains("/chrome") || exe.ends_with("/chrome"))
+        && !exe.contains("crashpad")
+}
+
+fn looks_like_chrome(comm: &str, exe: &str, cmdline: &str) -> bool {
+    comm_is_browser(comm)
+        || exe_is_browser(exe)
+        || cmdline.contains("chromium")
+        || cmdline.contains("google-chrome")
+        || cmdline.split('\0').any(|part| {
+            let base = Path::new(part)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            matches!(
+                base,
+                "chrome"
+                    | "chromium"
+                    | "chromium-browser"
+                    | "google-chrome"
+                    | "google-chrome-stable"
+            )
+        })
+}
+
+fn is_chrome_helper(comm: &str, cmdline: &str) -> bool {
+    let hay = format!("{comm} {cmdline}").to_ascii_lowercase();
+    hay.contains("crashpad")
+        || hay.contains("nacl_helper")
+        || hay.contains("chrome_crashpad")
+        || hay.contains("crash-handler")
+}
+
 fn display_env_matches(pid: &str, display: &str) -> bool {
     let Ok(env) = std::fs::read(format!("/proc/{pid}/environ")) else {
         return false;
     };
-    String::from_utf8_lossy(&env).contains(&format!("DISPLAY={display}"))
+    String::from_utf8_lossy(&env).split('\0').any(|entry| {
+        entry == format!("DISPLAY={display}") || entry == format!("DISPLAY={display}.0")
+    })
 }
 
 fn env_truthy(key: &str) -> Option<bool> {
@@ -148,5 +241,17 @@ mod tests {
     fn cdp_is_loopback_only() {
         let cfg = ChromeConfig::disabled();
         assert!(cfg.cdp_bind().starts_with("127.0.0.1:"));
+    }
+
+    #[test]
+    fn helpers_are_not_the_browser() {
+        assert!(is_chrome_helper(
+            "chrome_crashpad",
+            "chrome_crashpad_handler"
+        ));
+        assert!(!is_chrome_helper("chromium", "/usr/lib/chromium/chromium"));
+        assert!(comm_is_browser("chromium-browse"));
+        assert!(exe_is_browser("/usr/lib/chromium/chromium"));
+        assert!(!exe_is_browser("/usr/lib/chromium/chrome_crashpad_handler"));
     }
 }

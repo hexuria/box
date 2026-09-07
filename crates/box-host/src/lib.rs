@@ -1,175 +1,271 @@
+//! Thin host gateway for grok-box (`box-host`).
+//!
+//! This process does **not** run inference. It advertises box identity,
+//! capabilities (exec, files, desktop, chrome, cua), and readiness of
+//! `box-exec` (and the X display when desktop is required).
+
 use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use axum::extract::State;
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Json};
-use axum::routing::{get, post};
-use axum::Router;
+use axum::extract::{Request, State};
+use axum::middleware::{self, Next};
+use axum::response::Response;
+use axum::routing::get;
+use axum::{Json, Router};
+use box_chrome::{probe_chrome, ChromeConfig, ChromeStatus};
+use box_common::{
+    bearer_token, container_local_host, container_local_http_url, cors_layer, tokens_equal,
+    ApiError, BoxConfig, PROTOCOL_VERSION,
+};
+use box_cua::CuaConfig;
+use box_desktop::{DesktopConfig, DesktopStatus};
 use serde::Serialize;
-use tokio::net::TcpListener;
-use tokio::sync::Mutex;
-use tracing::info;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tower_http::trace::TraceLayer;
 
-use box_chrome::ChromeStatus;
-use box_common::cors_layer;
-use box_common::container_local_http_url;
-use box_common::listen_addr;
-use box_common::token::{auth_layer, TokenStore};
-use box_cua::CuaEngine;
-
-mod cua;
-mod files;
-mod screenshot;
-mod vnc;
-
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct AppState {
-    pub started: Instant,
-    pub token: TokenStore,
-    pub cua: Arc<CuaEngine>,
-    pub chrome: Arc<Mutex<ChromeStatus>>,
-    pub vnc_password: String,
-    pub desktop: bool,
-    pub exec_listen: SocketAddr,
-    pub host_listen: SocketAddr,
-    pub vnc_listen: SocketAddr,
+    pub box_id: String,
+    pub token: String,
+    pub workspace: String,
+    pub exec_url: String,
+    pub exec_bind: SocketAddr,
+    pub host_bind: SocketAddr,
+    pub desktop: DesktopConfig,
+    pub chrome: ChromeConfig,
+    pub cua: CuaConfig,
 }
 
 impl AppState {
-    pub fn new(
-        token: TokenStore,
-        cua: Arc<CuaEngine>,
-        chrome: Arc<Mutex<ChromeStatus>>,
-        vnc_password: String,
-        desktop: bool,
-        exec_listen: SocketAddr,
-        host_listen: SocketAddr,
-        vnc_listen: SocketAddr,
-    ) -> Self {
+    pub fn from_config(config: &BoxConfig) -> Self {
         Self {
-            started: Instant::now(),
-            token,
-            cua,
-            chrome,
-            vnc_password,
-            desktop,
-            exec_listen,
-            host_listen,
-            vnc_listen,
+            box_id: config.box_id.clone(),
+            token: config.host_token.clone(),
+            workspace: config.workspace.display().to_string(),
+            exec_url: config.exec_url.trim_end_matches('/').to_string(),
+            exec_bind: config.exec_bind,
+            host_bind: config.host_bind,
+            desktop: DesktopConfig::from_env(),
+            chrome: ChromeConfig::from_env(),
+            cua: CuaConfig::from_env(),
         }
     }
 }
 
 #[derive(Serialize)]
-struct HealthBody {
-    ok: bool,
-    service: &'static str,
-}
-
-#[derive(Serialize)]
-struct ReadyBody {
-    ok: bool,
-    service: &'static str,
-    desktop: bool,
-    chrome: ChromeStatus,
-}
-
-#[derive(Serialize)]
-struct InfoBody {
-    product: &'static str,
+struct HealthResponse {
+    status: &'static str,
     service: &'static str,
     version: &'static str,
-    uptime_ms: u128,
-    desktop: bool,
-    chrome: ChromeStatus,
-    endpoints: InfoEndpoints,
-    note: &'static str,
 }
 
 #[derive(Serialize)]
-struct InfoEndpoints {
-    /// Container-local listen addresses. Remote callers must use the URL they
-    /// already connected with; SDKs ignore these fields.
-    exec_url: String,
-    host_url: String,
-    vnc_ws_url: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    novnc_url: Option<String>,
+struct ReadyResponse {
+    status: &'static str,
+    service: &'static str,
+    exec_ready: bool,
+    desktop_ready: bool,
+}
+
+#[derive(Serialize)]
+struct InfoResponse {
+    box_id: String,
+    service: &'static str,
+    protocol: &'static str,
+    version: VersionInfo,
+    capabilities: Capabilities,
+    endpoints: Endpoints,
+    workspace: String,
+}
+
+#[derive(Serialize)]
+struct VersionInfo {
+    box_host: &'static str,
+    box_exec: &'static str,
+    protocol: &'static str,
+}
+
+#[derive(Serialize)]
+struct Capabilities {
+    exec: bool,
+    files: bool,
+    desktop: bool,
+    chrome: bool,
+    cua: bool,
+}
+
+#[derive(Serialize)]
+struct Endpoints {
+    exec: String,
+    host: String,
+    /// Always `container-local`. Not a public connect URL for SDKs.
     scope: &'static str,
 }
 
-async fn health() -> Json<HealthBody> {
-    Json(HealthBody {
-        ok: true,
-        service: "box-host",
-    })
-}
+pub fn app(state: AppState) -> Router {
+    let protected = Router::new()
+        .route("/v1/info", get(info))
+        .route("/v1/desktop", get(desktop))
+        .route("/v1/chrome", get(chrome))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
 
-async fn ready(State(state): State<AppState>) -> impl IntoResponse {
-    let chrome = state.chrome.lock().await.clone();
-    let body = ReadyBody {
-        ok: true,
-        service: "box-host",
-        desktop: state.desktop,
-        chrome,
-    };
-    (StatusCode::OK, Json(body))
-}
-
-async fn info(State(state): State<AppState>) -> Json<InfoBody> {
-    let chrome = state.chrome.lock().await.clone();
-    Json(InfoBody {
-        product: "grok-box",
-        service: "box-host",
-        version: env!("CARGO_PKG_VERSION"),
-        uptime_ms: state.started.elapsed().as_millis(),
-        desktop: state.desktop,
-        chrome,
-        endpoints: InfoEndpoints {
-            exec_url: container_local_http_url(state.exec_listen),
-            host_url: container_local_http_url(state.host_listen),
-            vnc_ws_url: format!("ws://{}/websockify", state.vnc_listen),
-            novnc_url: if state.desktop {
-                Some(format!("http://{}/vnc.html", state.vnc_listen))
-            } else {
-                None
-            },
-            scope: "container-local",
-        },
-        note: "endpoints are the daemons' listen addresses inside this container. Clients must keep using the exec URL, host URL, and token they connected with.",
-    })
-}
-
-fn public_router(state: AppState) -> Router {
     Router::new()
         .route("/v1/health", get(health))
         .route("/v1/ready", get(ready))
+        .merge(protected)
         .with_state(state)
 }
 
-fn protected_router(state: AppState) -> Router {
-    Router::new()
-        .route("/v1/info", get(info))
-        .nest("/v1/files", files::router())
-        .nest("/v1/cua", cua::router())
-        .nest("/v1/screenshot", screenshot::router())
-        .nest("/v1/vnc", vnc::router())
-        .with_state(state)
-        .layer(auth_layer())
-}
-
-fn app(state: AppState) -> Router {
-    public_router(state.clone())
-        .merge(protected_router(state))
+pub fn router(state: AppState) -> Router {
+    app(state)
+        .layer(TraceLayer::new_for_http())
         .layer(cors_layer())
 }
 
-pub async fn serve(addr: SocketAddr, state: AppState) -> anyhow::Result<()> {
-    let listener = TcpListener::bind(addr).await?;n    info!(%addr, "box-host listening");
-    axum::serve(listener, app(state)).await?;
+pub async fn serve(config: BoxConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let bind = config.host_bind;
+    let app = router(AppState::from_config(&config));
+    tracing::info!(%bind, box_id = %config.box_id, "box-host listening");
+    let listener = TcpListener::bind(bind).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
     Ok(())
+}
+
+async fn health() -> Json<HealthResponse> {
+    Json(HealthResponse {
+        status: "ok",
+        service: "box-host",
+        version: env!("CARGO_PKG_VERSION"),
+    })
+}
+
+async fn ready(State(state): State<AppState>) -> Result<Json<ReadyResponse>, ApiError> {
+    let exec_ready = probe_exec_health(&state.exec_url).await;
+    let desktop_ready = state.desktop.probe_display();
+    if !exec_ready {
+        return Err(ApiError::new(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "not_ready",
+            "box-exec is not reachable",
+        ));
+    }
+    if state.desktop.required && !desktop_ready {
+        return Err(ApiError::new(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "not_ready",
+            "desktop display is not up",
+        ));
+    }
+    Ok(Json(ReadyResponse {
+        status: "ready",
+        service: "box-host",
+        exec_ready: true,
+        desktop_ready,
+    }))
+}
+
+async fn info(State(state): State<AppState>) -> Json<InfoResponse> {
+    Json(InfoResponse {
+        box_id: state.box_id.clone(),
+        service: "box-host",
+        protocol: PROTOCOL_VERSION,
+        version: VersionInfo {
+            box_host: env!("CARGO_PKG_VERSION"),
+            box_exec: env!("CARGO_PKG_VERSION"),
+            protocol: PROTOCOL_VERSION,
+        },
+        capabilities: Capabilities {
+            exec: true,
+            files: true,
+            desktop: state.desktop.probe_display(),
+            chrome: probe_chrome(&state.chrome).running,
+            cua: state.cua.capability_ready(),
+        },
+        endpoints: Endpoints {
+            exec: container_local_http_url(state.exec_bind),
+            host: container_local_http_url(state.host_bind),
+            scope: "container-local",
+        },
+        workspace: state.workspace.clone(),
+    })
+}
+
+async fn desktop(State(state): State<AppState>) -> Json<DesktopStatus> {
+    let host = container_local_host(state.host_bind);
+    Json(DesktopStatus::from_config(&state.desktop, &host))
+}
+
+async fn chrome(State(state): State<AppState>) -> Json<ChromeStatus> {
+    Json(probe_chrome(&state.chrome))
+}
+
+async fn require_token(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Result<Response, ApiError> {
+    let presented = bearer_token(request.headers()).ok_or_else(ApiError::unauthorized)?;
+    if !tokens_equal(presented, &state.token) {
+        return Err(ApiError::unauthorized());
+    }
+    Ok(next.run(request).await)
+}
+
+/// Tiny HTTP/1.1 probe so box-host does not need an HTTP client crate.
+async fn probe_exec_health(exec_url: &str) -> bool {
+    let Some(addr) = host_port_from_url(exec_url) else {
+        return false;
+    };
+    let Ok(Ok(mut stream)) =
+        tokio::time::timeout(Duration::from_secs(1), TcpStream::connect(&addr)).await
+    else {
+        return false;
+    };
+    let req = format!("GET /v1/health HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    if stream.write_all(req.as_bytes()).await.is_err() {
+        return false;
+    }
+    let mut buf = vec![0u8; 256];
+    let Ok(n) = stream.read(&mut buf).await else {
+        return false;
+    };
+    let text = String::from_utf8_lossy(&buf[..n]);
+    text.starts_with("HTTP/1.1 200") || text.starts_with("HTTP/1.0 200")
+}
+
+fn host_port_from_url(url: &str) -> Option<String> {
+    let rest = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))?;
+    let hostport = rest.split('/').next().unwrap_or(rest);
+    if hostport.contains(':') {
+        Some(hostport.to_string())
+    } else {
+        Some(format!("{hostport}:80"))
+    }
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        if let Ok(mut sig) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            sig.recv().await;
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future.pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
 }
 
 #[cfg(test)]
@@ -177,133 +273,149 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
-    use box_common::token::TokenStore;
     use http_body_util::BodyExt;
+    use serde_json::Value;
     use tower::ServiceExt;
 
-    fn test_state() -> AppState {
-        AppState::new(
-            TokenStore::from_plain("test-token"),
-            Arc::new(CuaEngine::default()),
-            Arc::new(Mutex::new(ChromeStatus {
-                running: false,
-                pid: None,
-                cdp_port: 9222,
-            })),
-            "secret".into(),
-            false,
-            "127.0.0.1:1337".parse().unwrap(),
-            "127.0.0.1:1340".parse().unwrap(),
-            "127.0.0.1:6080".parse().unwrap(),
-        )
+    fn state() -> AppState {
+        AppState {
+            box_id: "test-box".into(),
+            token: "host-secret".into(),
+            workspace: "/workspace".into(),
+            exec_url: "http://127.0.0.1:1337".into(),
+            exec_bind: "0.0.0.0:1337".parse().unwrap(),
+            host_bind: "0.0.0.0:1340".parse().unwrap(),
+            desktop: DesktopConfig::disabled(),
+            chrome: ChromeConfig::disabled(),
+            cua: CuaConfig::disabled(),
+        }
     }
 
-    #[tokio::test]
-    async fn health_is_public() {
-        let response = app(test_state())
-            .oneshot(
-                Request::builder()
-                    .uri("/v1/health")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn ready_is_public() {
-        let response = app(test_state())
-            .oneshot(
-                Request::builder()
-                    .uri("/v1/ready")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn info_requires_token() {
-        let response = app(test_state())
-            .oneshot(
-                Request::builder()
-                    .uri("/v1/info")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn info_with_token_reports_container_local_urls() {
-        let response = app(test_state())
-            .oneshot(
-                Request::builder()
-                    .uri("/v1/info")
-                    .header("authorization", "Bearer test-token")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+    async fn send(req: Request<Body>) -> (StatusCode, Value) {
+        let response = app(state()).oneshot(req).await.unwrap();
+        let status = response.status();
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
-        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap();
+        (status, json)
+    }
+
+    #[tokio::test]
+    async fn health_public() {
+        let (status, body) = send(
+            Request::builder()
+                .uri("/v1/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["service"], "box-host");
+    }
+
+    #[tokio::test]
+    async fn info_rejects_missing_auth() {
+        let (status, body) = send(
+            Request::builder()
+                .uri("/v1/info")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"]["code"], "unauthorized");
+    }
+
+    #[tokio::test]
+    async fn info_rejects_wrong_token() {
+        let (status, body) = send(
+            Request::builder()
+                .uri("/v1/info")
+                .header("authorization", "Bearer nope")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"]["code"], "unauthorized");
+    }
+
+    #[tokio::test]
+    async fn info_ok_with_token() {
+        let (status, body) = send(
+            Request::builder()
+                .uri("/v1/info")
+                .header("authorization", "Bearer host-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["box_id"], "test-box");
+        assert_eq!(body["capabilities"]["exec"], true);
+        assert_eq!(body["capabilities"]["files"], true);
+        assert_eq!(body["capabilities"]["desktop"], false);
+        assert_eq!(body["capabilities"]["chrome"], false);
+        assert_eq!(body["capabilities"]["cua"], false);
+        assert_eq!(body["endpoints"]["exec"], "http://127.0.0.1:1337");
+        assert_eq!(body["endpoints"]["host"], "http://127.0.0.1:1340");
         assert_eq!(body["endpoints"]["scope"], "container-local");
-        assert_eq!(body["endpoints"]["exec_url"], "http://127.0.0.1:1337");
-        assert_eq!(body["endpoints"]["host_url"], "http://127.0.0.1:1340");
+    }
+
+    #[tokio::test]
+    async fn chrome_ok_when_disabled() {
+        let (status, body) = send(
+            Request::builder()
+                .uri("/v1/chrome")
+                .header("authorization", "Bearer host-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["enabled"], false);
+        assert_eq!(body["running"], false);
+        assert!(body["cdp"].is_null());
+    }
+
+    #[tokio::test]
+    async fn desktop_rejects_missing_auth() {
+        let (status, body) = send(
+            Request::builder()
+                .uri("/v1/desktop")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"]["code"], "unauthorized");
+    }
+
+    #[tokio::test]
+    async fn desktop_ok_when_disabled() {
+        let (status, body) = send(
+            Request::builder()
+                .uri("/v1/desktop")
+                .header("authorization", "Bearer host-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["available"], false);
+        assert_eq!(body["display"], ":1");
+        assert_eq!(body["viewer"]["port"], 6080);
+        assert_eq!(body["viewer"]["path"], "/vnc.html");
+    }
+
+    #[test]
+    fn parse_exec_url() {
         assert_eq!(
-            body["note"].as_str().unwrap().contains("listen addresses"),
-            true
+            host_port_from_url("http://127.0.0.1:1337"),
+            Some("127.0.0.1:1337".into())
         );
-    }
-
-    #[tokio::test]
-    async fn screenshot_requires_token() {
-        let response = app(test_state())
-            .oneshot(
-                Request::builder()
-                    .uri("/v1/screenshot")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn files_requires_token() {
-        let response = app(test_state())
-            .oneshot(
-                Request::builder()
-                    .uri("/v1/files?path=/tmp/x")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn cua_requires_token() {
-        let response = app(test_state())
-            .oneshot(
-                Request::builder()
-                    .uri("/v1/cua/click")
-                    .method("POST")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            host_port_from_url("http://127.0.0.1:1337/v1/health"),
+            Some("127.0.0.1:1337".into())
+        );
     }
 }
