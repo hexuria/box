@@ -1,6 +1,8 @@
 # EnsureBox — Grok Bot Layer 2
 
-Control plane for [grok-box](https://github.com/hexuria/box). It creates Linux guests from the `grok-box` image, holds each box token, waits until the guest is ready, and routes shell / files / Computer Use. It does not run models (that is L4) and it is not the sandboxed computer (that is L3).
+Control plane for [grok-box](https://github.com/hexuria/box). It creates Linux guests from the `grok-box` image, holds each box token, waits until the guest is ready, and exposes an HTTP API so L1 can run shell / files / Computer Use. It does not run models (that is L4) and it is not the sandboxed computer (that is L3).
+
+The browser UI on this app is a **thin operator console**: ports, volumes, container identity, and lifecycle. It does not include shell, files, or CUA. Those belong in [`../l1`](../l1).
 
 The guest image is unchanged: EnsureBox lives next to it, and is not copied into the Docker image.
 
@@ -21,7 +23,7 @@ npm install
 npm run dev
 ```
 
-Open [http://127.0.0.1:43142](http://127.0.0.1:43142). Create a box, wait until status is `ready`, run `echo ok`, take a screenshot, or open the noVNC viewer.
+Open [http://127.0.0.1:43142](http://127.0.0.1:43142) to provision a guest, inspect host ports and volumes, and start or destroy it. Use the L1 client on [http://127.0.0.1:43141](http://127.0.0.1:43141) to work in the box.
 
 If the Node process cannot talk to Docker, run:
 
@@ -38,13 +40,11 @@ sg docker -c 'npm run dev'
 | **Stop** | `docker stop`, keep container + volumes |
 | **Hibernate** | Stop and keep volumes (resume with **Start**) |
 | **Destroy** | `docker rm -f` and delete volumes |
-| **Tools** | Proxy to guest `box-exec` with the stored `BOX_TOKEN` |
+| **HTTP tools** | Proxy to guest `box-exec` with the stored `BOX_TOKEN` (for L1, not the operator UI) |
 
 Published guest ports are bound to `127.0.0.1`. Raw VNC (5900) and CDP (9222) stay inside the guest.
 
-The Layer 1 client lives in [`../l1`](../l1). It is a separate Next.js app on port **43141** that calls only this HTTP API.
-
-## HTTP API (programmatic L1 / L2)
+## HTTP API (L1 wire)
 
 Base: `http://127.0.0.1:43142`
 
@@ -68,7 +68,7 @@ Auth: `Authorization: Bearer <ENSUREBOX_TOKEN>` except `GET /api/v1/health`.
 | POST | `/api/v1/boxes/:id/cua/key` `{key}` |
 | POST | `/api/v1/boxes/:id/cua/scroll` `{x,y,dx,dy}` |
 
-The dashboard never sends the guest `BOX_TOKEN` to the browser. Responses omit it. VNC password shown in the UI is the first 8 characters of that token. L1 uses the same public payload.
+The operator console never sends the guest `BOX_TOKEN` to the browser. Responses omit it. VNC password is shown as a viewer password, not as a usable box credential.
 
 ## Smoke
 
@@ -76,4 +76,4 @@ The dashboard never sends the guest `BOX_TOKEN` to the browser. Responses omit i
 ./scripts/smoke.sh
 ```
 
-Requires Docker, a `grok-box:local` (or `GROK_BOX_IMAGE`) image, and a running EnsureBox server (`npm run dev`).
+Requires Docker, a `grok-box:local` (or `GROK_BOX_IMAGE`) image, and a running EnsureBox server (`npm run dev`). The script hits the HTTP API (including exec and screenshot) and checks that the dashboard HTML is not a tools UI.

@@ -8,15 +8,16 @@ Working names: **grok-box**, **askit-box**. Role: **Grok Bot Layer 3** — the s
 ┌─────────────────────────────────────────────────────────────┐
 │ L1  Client / desktop                                        │
 │     Reference app: ./l1 (not in the guest image).           │
-│     Human UI. Talks only to EnsureBox.                      │
-│     Never SSHes. Never holds BOX_TOKEN.                     │
+│     Human UI: shell, files, desktop. Talks only to          │
+│     EnsureBox. Never SSHes. Never holds BOX_TOKEN.          │
 └────────────────────────────┬────────────────────────────────┘
                              │
 ┌────────────────────────────▼────────────────────────────────┐
 │ L2  Server / control plane                                  │
 │     Tool router. Owns EnsureBox lifecycle.                  │
 │     Reference app: ./ensurebox (not in the guest image).    │
-│     Holds BOX_TOKEN. Does not execute agent shell itself.   │
+│     Operator console: Docker, ports, volumes, lifecycle.    │
+│     Holds BOX_TOKEN. HTTP /api/v1 is the L1 wire.           │
 └────────────────────────────┬────────────────────────────────┘
                              │ HTTP + Bearer
 ┌────────────────────────────▼────────────────────────────────┐
@@ -31,7 +32,7 @@ Working names: **grok-box**, **askit-box**. Role: **Grok Bot Layer 3** — the s
 ┌────────────────────────────▼────────────────────────────────┐
 │ L4  open-ai-gateway (OAG)                                   │
 │     Model calls. No workspace, no X11, no shell.            │
-└─────────────────────────────────────────────────────────────┘
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ## Glossary
@@ -42,15 +43,15 @@ Working names: **grok-box**, **askit-box**. Role: **Grok Bot Layer 3** — the s
 | **box-host** (host gateway) | Thin in-box process that publishes identity, capability flags, and readiness. Analogous *job* to a “sand-host / host gateway.” Does **not** run models. |
 | **OAG / inference gateway** | L4. OpenAI-compatible (or similar) HTTP API in front of weights. Separate process, separate repo. |
 | **CUA** | Computer Use: screenshot / click / type / key / scroll against the box X display (`POST /v1/cua/*` on `box-exec`). Coordinate space is the framebuffer **1280×800**, origin top-left. |
-| **L1 client** | Human UI in `./l1`. Bearer `ENSUREBOX_TOKEN` only. Never calls guest `box-exec` / `box-host`. |
-| **EnsureBox** | L2 API/workflow that creates, stops, or hibernates a box. **Server-owned.** This image is the guest, not the orchestrator. |
+| **L1 client** | Human UI in `./l1`: shell, files, desktop. Bearer `ENSUREBOX_TOKEN` only. Never calls guest `box-exec` / `box-host`. |
+| **EnsureBox** | L2 API and operator console that creates, stops, or hibernates a box. Holds `BOX_TOKEN`. Shell/files/CUA **UI** is L1; the HTTP routes still live here. |
 | **Workspace jail** | All `cwd` and file paths are resolved under `WORKSPACE_ROOT` (default `/workspace`). Commands may invoke system binaries (`/bin/echo`); they may not use a cwd or file path outside the jail. |
 
 ## Ports
 
 | Port | Process | Routes / role |
 | --- | --- | --- |
-| **1337** | `box-exec` | `GET /v1/health`, `POST /v1/exec`, `GET|PUT /v1/files`, `POST /v1/cua/*` |
+| **1337** | `box-exec` | `GET /v1/health`, `POST /v1/exec`, `GET\|PUT /v1/files`, `POST /v1/cua/*` |
 | **1340** | `box-host` | `GET /v1/health`, `GET /v1/ready`, `GET /v1/info`, `GET /v1/desktop`, `GET /v1/chrome` |
 | **6080** | websockify + noVNC | Viewer HTML at `/vnc.html`. Published by Compose. |
 | 5900 | x11vnc | RFB on **localhost only** (`BOX_VNC_BIND`). Not published. |
@@ -135,9 +136,9 @@ Windows and macOS remain **clients** and/or **Docker hosts** for this Linux box;
 
 The image is a **guest**. L2 decides when a box exists.
 
-A reference control plane lives in [`ensurebox/`](../ensurebox/README.md). It is a Next.js app with an operator UI and `/api/v1/boxes*` routes. It is **not** baked into the grok-box image (see `.dockerignore`).
+A reference control plane lives in [`ensurebox/`](../ensurebox/README.md). It is a Next.js app with a **thin operator console** (ports, volumes, container, lifecycle) and `/api/v1/boxes*` routes. It is **not** baked into the grok-box image (see `.dockerignore`). The operator UI does not include shell, files, or CUA.
 
-A reference L1 client lives in [`l1/`](../l1/README.md). It talks **only** to EnsureBox (`ENSUREBOX_TOKEN`) and never holds `BOX_TOKEN`.
+A reference L1 client lives in [`l1/`](../l1/README.md). It is the human workspace UI (shell, files, desktop). It talks **only** to EnsureBox (`ENSUREBOX_TOKEN`) and never holds `BOX_TOKEN`.
 
 | Operation | L2 action | Volume |
 | --- | --- | --- |
