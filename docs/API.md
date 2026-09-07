@@ -10,7 +10,7 @@ SDKs and the CLI are connect-only: pass those three values (exec URL, host URL, 
 
 Machine-readable spec: [openapi.yaml](openapi.yaml).
 
-Auth: `Authorization: Bearer <BOX_TOKEN>` unless noted. Errors:
+Auth: `Authorization: Bearer <BOX_TOKEN>` unless noted. `GET /v1/health` is the only public guest probe (`{"status":"ok"}`). `GET /v1/ready` requires Bearer. Errors:
 
 ```json
 {
@@ -35,8 +35,10 @@ CORS is not permissive. Set `BOX_CORS_ORIGINS` to an explicit allowlist if a bro
 ### `GET /v1/health` (public)
 
 ```json
-{ "status": "ok", "service": "box-exec", "version": "0.1.0" }
+{ "status": "ok" }
 ```
+
+No service or version fields. This is a liveness probe, not an inventory.
 
 ### `POST /v1/exec`
 
@@ -66,7 +68,7 @@ Run a process. `cwd` defaults to the workspace root and is jail-checked.
 }
 ```
 
-On timeout: `timed_out: true`, `exit_code: null`, process group is killed. **Captured stdout/stderr are kept.** Output streams are capped (`BOX_MAX_OUTPUT_BYTES`, default 8 MiB); `truncated` is true if a cap hit. After writing `stdin`, the pipe is closed so the child sees EOF. `BOX_TOKEN`, `BOX_HOST_TOKEN`, and `BOX_VNC_PASSWORD` are stripped from the child environment.
+On timeout: `timed_out: true`, `exit_code: null`, process group is killed. **Captured stdout/stderr are kept.** Output streams are capped (`BOX_MAX_OUTPUT_BYTES`, default 8 MiB); `truncated` is true if a cap hit. After writing `stdin`, the pipe is closed so the child sees EOF. `BOX_TOKEN`, `BOX_HOST_TOKEN`, and `BOX_VNC_PASSWORD` are stripped from the child environment. The daemons also drop those variables from their own process environ after loading config.
 
 Default timeout 30s; max 10 minutes (`BOX_DEFAULT_TIMEOUT_MS`, `BOX_MAX_TIMEOUT_MS`).
 
@@ -219,12 +221,12 @@ Moves to `(x,y)` then emits wheel clicks in one xdotool invocation. Positive `dy
 ### `GET /v1/health` (public)
 
 ```json
-{ "status": "ok", "service": "box-host", "version": "0.1.0" }
+{ "status": "ok" }
 ```
 
-### `GET /v1/ready` (public)
+### `GET /v1/ready` (bearer)
 
-`200` when `box-exec` answers `/v1/health`, and (when `BOX_DESKTOP_REQUIRED=1`) the X display is up. Otherwise `503` with `error.code = not_ready`. Chrome is not required for ready.
+`200` when `box-exec` answers `/v1/health`, and (when `BOX_DESKTOP_REQUIRED=1`) the X display is up. Otherwise `503` with `error.code = not_ready`. Chrome is not required for ready. Missing or invalid Bearer is `401`.
 
 ```json
 { "status": "ready", "service": "box-host", "exec_ready": true, "desktop_ready": true }
@@ -278,7 +280,7 @@ Uses `BOX_HOST_TOKEN` if set, else `BOX_TOKEN`.
 }
 ```
 
-Connect to `viewer.url`. VNC password = first 8 characters of `BOX_TOKEN` (or `BOX_VNC_PASSWORD`). RFB is localhost-only inside the container; Compose maps 6080.
+Connect to `viewer.url` through a tunnel or loopback publish. VNC password is `BOX_VNC_PASSWORD` (x11vnc uses the first **8** characters). It is independent of `BOX_TOKEN`. RFB is localhost-only inside the container; Compose publishes noVNC on **127.0.0.1:6080**. 6080 is **not** Bearer-authenticated.
 
 ### `GET /v1/chrome` (bearer)
 
