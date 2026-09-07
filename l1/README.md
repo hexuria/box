@@ -39,7 +39,7 @@ Open [http://127.0.0.1:43141](http://127.0.0.1:43141) and sign in with `L1_TOKEN
 | Wake | `POST /api/v1/boxes/:id/start` |
 | Shell | `POST /api/v1/boxes/:id/exec` |
 | Files | `GET` / `PUT /api/v1/boxes/:id/files` |
-| Computer use | `POST /api/v1/boxes/:id/cua/*` |
+| Computer use | `POST /api/v1/boxes/:id/cua/*` including `cua/recipe` |
 
 Auth: pages and server actions require `L1_TOKEN` (httpOnly cookie after login). The L1 server calls EnsureBox with `Authorization: Bearer <ENSUREBOX_TOKEN>`. That token belongs to the demo L2 API, not to a guest, and is never sent to the browser.
 
@@ -48,7 +48,7 @@ Desktop is screenshots through EnsureBox CUA. L1 does not link guest noVNC ports
 ## Environment
 
 | Variable | Default | Meaning |
-| --- | --- | --- |
+| --- | --- |
 | `ENSUREBOX_URL` | `http://127.0.0.1:43142` | Demo L2 base URL |
 | `ENSUREBOX_TOKEN` | required | Server-side Bearer token for EnsureBox |
 | `ENSUREBOX_ALLOW_INSECURE_DEV` | unset | `1` allows the well-known/short EnsureBox token locally |

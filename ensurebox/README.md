@@ -71,6 +71,7 @@ Auth: `Authorization: Bearer <ENSUREBOX_TOKEN>` except `GET /api/v1/health`. The
 | POST | `/api/v1/boxes/:id/cua/type` |
 | POST | `/api/v1/boxes/:id/cua/key` |
 | POST | `/api/v1/boxes/:id/cua/scroll` |
+| POST | `/api/v1/boxes/:id/cua/recipe` |
 
 The operator console never sends the guest `BOX_TOKEN` to the browser or to L1. Public `/api/v1` box JSON omits guest bind URLs and the VNC password. After login, the operator page may show host ports/volumes and the independent VNC password (not derived from the box token). 6080 is not Bearer-authenticated.
 

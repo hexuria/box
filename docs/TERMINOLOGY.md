@@ -16,6 +16,7 @@ Names used in this repository. The public product name, the workspace crate, and
 | **`/v1/info` endpoints** | Container-local listen URLs. Honest inventory, not the SDK connect source of truth. |
 | **workspace jail** | `WORKSPACE_ROOT` (default `/workspace`). cwd and file APIs cannot leave it. |
 | **CUA** | Computer Use against the X framebuffer. Coordinate space **1280×800**, origin **top-left**. |
+| **recipe** | `POST /v1/cua/recipe`: many CUA steps in one request, lint-then-run, receipt. Not a reverse-web-mcp compiler. |
 | **screenshot JSON** | `{ encoding, mime, width, height, bytes, png_base64 }` |
 | **screenshot PNG** | Raw `image/png` body when `Accept: image/png` or `?format=png` |
 | **EnsureBox (L2)** | **Demo** orchestrator: Docker lifecycle + HTTP proxy. Not a supported production control plane. |

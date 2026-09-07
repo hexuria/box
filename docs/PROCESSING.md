@@ -71,6 +71,27 @@ Actuators talk to `DISPLAY=:1` (1280×800, origin top-left). Out-of-range coordi
 | `type` | xdotool type (short key delay) |
 | `key` | xdotool keysym |
 | `scroll` | Move, then wheel repeats in one xdotool invocation |
+| **`recipe`** | **Many of the above in one request.** Lint the whole plan, then run sequentially. See [`RECIPES.md`](RECIPES.md). |
+
+### Recipe (`POST /v1/cua/recipe`)
+
+The caller already knows the choreography (click, type, key, …). One Bearer POST runs it. The pointer is shared, so steps are sequential. Invalid plans (`steps` empty, >64 steps, out-of-range coordinates) return **400** and do not move the mouse.
+
+Default `screenshot` is `end` (one PNG on the receipt). Use `none` if you will screenshot yourself. `each` is large.
+
+```json
+{
+  "name": "search",
+  "stop_on_error": true,
+  "screenshot": "end",
+  "steps": [
+    { "op": "click", "x": 640, "y": 80 },
+    { "op": "type", "text": "hello" },
+    { "op": "key", "key": "Return" },
+    { "op": "wait", "ms": 200 }
+  ]
+}
+```
 
 ## Host inventory
 
