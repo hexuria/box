@@ -76,7 +76,7 @@ Actuators talk to `DISPLAY=:1` (1280×800, origin top-left). Out-of-range coordi
 
 `GET /v1/info` (bearer) returns box id, capability flags, workspace path, and **container-local** endpoint URLs (`scope: container-local`). Use it to see whether desktop/chrome/CUA are up. Do not dial those URLs from another machine; dial the URLs you published.
 
-`GET /v1/desktop` and `/v1/chrome` are the same: status inside the guest. Viewer and CDP addresses are loopback unless you published noVNC (6080) yourself.
+`GET /v1/desktop` and `GET /v1/chrome` are the same: status inside the guest. Viewer and CDP addresses are loopback unless you published noVNC (6080) yourself.
 
 ## Demo proxy (EnsureBox)
 
