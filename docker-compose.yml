@@ -6,7 +6,8 @@ services:
     image: grok-box:local
     shm_size: "256mb"
     environment:
-      BOX_TOKEN: ${BOX_TOKEN:-dev-box-token}
+      BOX_TOKEN: ${BOX_TOKEN:?BOX_TOKEN is required}
+      BOX_VNC_PASSWORD: ${BOX_VNC_PASSWORD:?BOX_VNC_PASSWORD is required (x11vnc uses the first 8 characters)}
       BOX_ID: ${BOX_ID:-local-dev}
       RUST_LOG: ${RUST_LOG:-info}
       WORKSPACE_ROOT: /workspace
@@ -20,15 +21,21 @@ services:
       BOX_CHROME_PROFILE: /home/box/chrome-profile
       BOX_CDP_PORT: ${BOX_CDP_PORT:-9222}
       BOX_CUA: ${BOX_CUA:-1}
+      BOX_EXEC_BIND: 0.0.0.0:1337
+      BOX_HOST_BIND: 0.0.0.0:1340
     ports:
-      - "1337:1337"
-      - "1340:1340"
-      - "6080:6080"
+      - "127.0.0.1:1337:1337"
+      - "127.0.0.1:1340:1340"
+      - "127.0.0.1:6080:6080"
     volumes:
       - ./workspace-data:/workspace
       - ./chrome-profile:/home/box/chrome-profile
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:1340/v1/ready"]
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS -H \"Authorization: Bearer $$BOX_TOKEN\" http://127.0.0.1:1340/v1/ready",
+        ]
       interval: 5s
       timeout: 3s
       retries: 12
