@@ -19,6 +19,13 @@ x11rb = { workspace = true }
 png = { workspace = true }
 smallvec = { workspace = true }
 arrayvec = { workspace = true }
+# Optional so `cargo bench -p box-cua --features mimalloc` matches the guest
+# #[global_allocator]. The library does not install an allocator; box-exec does.
+mimalloc = { workspace = true, optional = true }
+
+[features]
+default = []
+mimalloc = ["dep:mimalloc"]
 
 [dev-dependencies]
 serde_json = { workspace = true }

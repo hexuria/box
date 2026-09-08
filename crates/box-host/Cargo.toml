@@ -7,6 +7,11 @@ authors.workspace = true
 description = "Layer 3 host gateway: identity, capabilities, readiness"
 rust-version.workspace = true
 
+[features]
+default = ["mimalloc"]
+# Same process-wide heap as box-exec. Guest image builds leave this on.
+mimalloc = ["box-common/mimalloc"]
+
 [dependencies]
 box-common = { workspace = true }
 box-desktop = { workspace = true }
