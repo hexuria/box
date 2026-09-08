@@ -148,6 +148,20 @@ Workspace-only (do not publish):
 
 The EnsureBox demo’s guest HTTP helper uses the TypeScript SDK. L1 still talks only to EnsureBox `/api/v1`.
 
+## Allocators (by lifetime)
+
+The guest does **not** use one allocator for every object.
+
+| Lifetime | Tool | Why |
+| --- | --- | --- |
+| Process-wide / mixed size / many threads | **mimalloc** `#[global_allocator]` on `box-exec` and `box-host` | Same job as in Bun: general-purpose, thread-local caches, less fragmentation than glibc for long-lived daemons. Not a bump arena. |
+| Short-lived tiny lists (chords, drag waypoints) | `ArrayVec` / `SmallVec` | Stack storage. bumpalo lost this comparison and is bench-only. |
+| Screenshot RGB (3 077 760 bytes) | Reused `ShotConn.rgb` | Skip alloc when geometry is unchanged. |
+
+`box-cua` is a library; it inherits the daemon’s global allocator. `cargo bench -p box-cua --features mimalloc` installs the same heap in the criterion binary. A typed mimalloc heap is not used: the crate only exposes `GlobalAlloc` safely.
+
+Disable with `--no-default-features` on `box-exec` / `box-host`. Measured: in-guest screenshot/move/click are a wash vs glibc; criterion heap churn is ~5× and unreused GetImage PNG is faster. Default stays **on**.
+
 ## What is intentionally missing
 
 - No model weights, no OpenAI wire on 1337/1340
