@@ -1,6 +1,7 @@
 //! Computer-use HTTP handlers on `box-exec`.
 //!
-//! Actuators talk to Xvfb (`DISPLAY=:1`, 1280×800) via xdotool / ImageMagick.
+//! Actuators talk to Xvfb (`DISPLAY=:1`, 1280×800) via in-process XTEST /
+//! GetImage (xdotool / ImageMagick fallback).
 
 use axum::extract::{Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -8,9 +9,10 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use box_common::ApiError;
 use box_cua::{
-    click, double_click, drag, key, move_pointer, run_recipe, screenshot, screenshot_png, scroll,
-    type_text, ClickRequest, CuaError, DragRequest, KeyRequest, MoveRequest, OkResponse,
-    RecipeRequest, RecipeResponse, ScrollRequest, TypeRequest,
+    click, double_click, drag, key, move_pointer, press, release, run_recipe, screenshot,
+    screenshot_png, scroll, type_text, ClickRequest, CuaError, DragRequest, KeyRequest,
+    MoveRequest, OkResponse, RecipeRequest, RecipeResponse, ReleaseRequest, ScrollRequest,
+    TypeRequest,
 };
 use serde::Deserialize;
 
@@ -43,11 +45,10 @@ pub fn map_err(err: CuaError) -> ApiError {
 
 fn want_png(headers: &HeaderMap, query: &ScreenshotQuery) -> bool {
     if let Some(format) = query.format.as_deref() {
-        let format = format.trim().to_ascii_lowercase();
-        if format == "png" {
+        if format.trim().eq_ignore_ascii_case("png") {
             return true;
         }
-        if format == "json" {
+        if format.trim().eq_ignore_ascii_case("json") {
             return false;
         }
     }
@@ -108,6 +109,20 @@ pub async fn drag_handler(
     Json(req): Json<DragRequest>,
 ) -> Result<Json<OkResponse>, ApiError> {
     drag(&state.cua, &req).await.map(Json).map_err(map_err)
+}
+
+pub async fn press_handler(
+    State(state): State<AppState>,
+    Json(req): Json<ClickRequest>,
+) -> Result<Json<OkResponse>, ApiError> {
+    press(&state.cua, &req).await.map(Json).map_err(map_err)
+}
+
+pub async fn release_handler(
+    State(state): State<AppState>,
+    Json(req): Json<ReleaseRequest>,
+) -> Result<Json<OkResponse>, ApiError> {
+    release(&state.cua, &req).await.map(Json).map_err(map_err)
 }
 
 pub async fn type_handler(
