@@ -20,6 +20,8 @@ use x11rb::NONE;
 use crate::encode;
 use crate::keys::{char_to_keysym, parse_key_sequence, XK_ALT_L, XK_CONTROL_L, XK_SHIFT_L, XK_SUPER_L};
 use crate::{CuaConfig, CuaError, CuaPoint, KeyAction, MAX_COLLECTED_POINTS};
+#[path = "x11_key.rs"]
+mod x11_key;
 
 static INPUT: Mutex<Option<InputState>> = Mutex::new(None);
 static SHOT: Mutex<Option<ShotConn>> = Mutex::new(None);
@@ -253,17 +255,19 @@ pub(crate) async fn scroll(config: &CuaConfig, x: i32, y: i32, dx: i32, dy: i32)
     }
 }
 pub(crate) async fn type_text(config: &CuaConfig, text: &str) -> Result<(), CuaError> {
-    match with_native(&config.display, |c| {
-        let _ = c; Err(CuaError::Tool("type via xdotool fallback in compact review upload".into()))
-    }) {
+    match with_native(&config.display, |c| c.type_text(text)) {
         Some(Ok(())) => Ok(()),
         _ => crate::xdotool::xdotool(config, &["type", "--clearmodifiers", "--delay", "1", "--", text]).await,
     }
 }
 pub(crate) async fn key(config: &CuaConfig, key: &str, action: KeyAction) -> Result<(), CuaError> {
-    match action {
-        KeyAction::Tap => crate::xdotool::xdotool(config, &["key", "--clearmodifiers", key]).await,
-        KeyAction::Down => crate::xdotool::xdotool(config, &["keydown", key]).await,
-        KeyAction::Up => crate::xdotool::xdotool(config, &["keyup", key]).await,
+    let clear = matches!(action, KeyAction::Tap);
+    match with_native(&config.display, |c| c.key_seq(key, action, clear)) {
+        Some(Ok(())) => Ok(()),
+        _ => match action {
+            KeyAction::Tap => crate::xdotool::xdotool(config, &["key", "--clearmodifiers", key]).await,
+            KeyAction::Down => crate::xdotool::xdotool(config, &["keydown", key]).await,
+            KeyAction::Up => crate::xdotool::xdotool(config, &["keyup", key]).await,
+        },
     }
 }
