@@ -227,3 +227,135 @@ async fn run_step(config: &CuaConfig, step: &RecipeStep) -> Result<Option<Screen
         RecipeStep::Screenshot {} => Ok(Some(screenshot(config).await?)),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg() -> CuaConfig {
+        let mut cfg = CuaConfig::disabled();
+        cfg.enabled = true;
+        cfg
+    }
+
+    #[test]
+    fn rejects_empty() {
+        let req = RecipeRequest {
+            name: None,
+            stop_on_error: None,
+            screenshot: None,
+            steps: vec![],
+        };
+        assert!(matches!(
+            validate_recipe(&cfg(), &req),
+            Err(CuaError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_too_many_steps() {
+        let step = RecipeStep::Wait { ms: 1 };
+        let req = RecipeRequest {
+            name: None,
+            stop_on_error: None,
+            screenshot: Some(RecipeScreenshot::None),
+            steps: vec![step; MAX_RECIPE_STEPS + 1],
+        };
+        assert!(validate_recipe(&cfg(), &req).is_err());
+    }
+
+    #[test]
+    fn rejects_out_of_range_before_run() {
+        let req = RecipeRequest {
+            name: None,
+            stop_on_error: None,
+            screenshot: Some(RecipeScreenshot::None),
+            steps: vec![
+                RecipeStep::Move { x: 0, y: 0 },
+                RecipeStep::Click {
+                    x: 1280,
+                    y: 0,
+                    button: None,
+                },
+            ],
+        };
+        assert!(matches!(
+            validate_recipe(&cfg(), &req),
+            Err(CuaError::OutOfRange(1280, 0, 1280, 800))
+        ));
+    }
+
+    #[test]
+    fn rejects_long_wait() {
+        let req = RecipeRequest {
+            name: None,
+            stop_on_error: None,
+            screenshot: Some(RecipeScreenshot::None),
+            steps: vec![RecipeStep::Wait {
+                ms: MAX_WAIT_MS + 1,
+            }],
+        };
+        assert!(validate_recipe(&cfg(), &req).is_err());
+    }
+
+    #[test]
+    fn parses_double_click_alias() {
+        let step: RecipeStep =
+            serde_json::from_str(r#"{"op":"double-click","x":1,"y":2}"#).unwrap();
+        assert!(matches!(step, RecipeStep::DoubleClick { x: 1, y: 2, .. }));
+        let step: RecipeStep =
+            serde_json::from_str(r#"{"op":"double_click","x":1,"y":2}"#).unwrap();
+        assert!(matches!(step, RecipeStep::DoubleClick { .. }));
+    }
+
+    #[test]
+    fn parses_press_release_and_key_action() {
+        let press: RecipeStep =
+            serde_json::from_str(r#"{"op":"press","x":10,"y":20,"button":1}"#).unwrap();
+        assert!(matches!(press, RecipeStep::Press { x: 10, y: 20, .. }));
+        let release: RecipeStep =
+            serde_json::from_str(r#"{"op":"release","x":40,"y":50}"#).unwrap();
+        assert!(matches!(
+            release,
+            RecipeStep::Release {
+                x: Some(40),
+                y: Some(50),
+                ..
+            }
+        ));
+        let key_down: RecipeStep =
+            serde_json::from_str(r#"{"op":"key","key":"shift","action":"down"}"#).unwrap();
+        assert!(matches!(
+            key_down,
+            RecipeStep::Key {
+                action: Some(KeyAction::Down),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn accepts_known_path() {
+        let req = RecipeRequest {
+            name: Some("open-url".into()),
+            stop_on_error: Some(true),
+            screenshot: Some(RecipeScreenshot::End),
+            steps: vec![
+                RecipeStep::Click {
+                    x: 640,
+                    y: 400,
+                    button: Some(1),
+                },
+                RecipeStep::Type {
+                    text: "hello".into(),
+                },
+                RecipeStep::Key {
+                    key: "Return".into(),
+                    action: None,
+                },
+                RecipeStep::Wait { ms: 50 },
+            ],
+        };
+        assert!(validate_recipe(&cfg(), &req).is_ok());
+    }
+}
