@@ -48,4 +48,6 @@ x11rb = { version = "0.13", default-features = true, features = ["xtest", "image
 png = "0.17"
 smallvec = "1.13"
 arrayvec = "0.7"
+# Guest daemons (box-exec / box-host). Not bumpalo: general-purpose, thread-local caches.
+mimalloc = { version = "0.1.52", default-features = false }
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }

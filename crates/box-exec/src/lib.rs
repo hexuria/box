@@ -1,7 +1,8 @@
 //! HTTP exec daemon for grok-box (`box-exec`).
 //!
 //! Shell, workspace files, and Computer Use (CUA) actuators against the
-//! box X display. Inference stays in L4.
+//! box X display. Inference stays in L4. The process-wide heap is mimalloc
+//! when the `mimalloc` feature is on (default); see `box_common::GLOBAL_ALLOCATOR`.
 
 mod cua;
 mod exec;
@@ -13,7 +14,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use axum::Router;
-use box_common::{cors_layer, BoxConfig};
+use box_common::{cors_layer, BoxConfig, GLOBAL_ALLOCATOR};
 use box_cua::CuaConfig;
 use tokio::net::TcpListener;
 use tower_http::limit::RequestBodyLimitLayer;
@@ -70,6 +71,7 @@ pub async fn serve(config: BoxConfig) -> Result<(), Box<dyn std::error::Error + 
     tracing::info!(
         %bind,
         workspace = %config.workspace.display(),
+        allocator = GLOBAL_ALLOCATOR,
         "box-exec listening"
     );
     let listener = TcpListener::bind(bind).await?;

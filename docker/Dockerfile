@@ -1,5 +1,8 @@
 # syntax=docker/dockerfile:1
 # grok-box: box-exec + box-host + Xvfb desktop + Chromium + CUA tools.
+#
+# box-exec / box-host default features compile in mimalloc (needs gcc, already
+# in rust:bookworm). Opt out with cargo --no-default-features.
 
 FROM rust:1.85-bookworm AS builder
 WORKDIR /src
