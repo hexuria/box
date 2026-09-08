@@ -117,6 +117,8 @@ impl RecipeStep {
 pub struct RecipeRequest {
     #[serde(default)]
     pub name: Option<String>,
+    /// Default true: stop after the first failing step. Already-run steps stay
+    /// in the receipt.
     #[serde(default)]
     pub stop_on_error: Option<bool>,
     #[serde(default)]
@@ -134,6 +136,32 @@ impl RecipeRequest {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct RecipeStepResult {
+    pub index: usize,
+    pub op: &'static str,
+    pub ok: bool,
+    pub ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub screenshot: Option<ScreenshotResponse>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RecipeResponse {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub ran: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stopped_at: Option<usize>,
+    pub duration_ms: u64,
+    pub steps: Vec<RecipeStepResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub screenshot: Option<ScreenshotResponse>,
+}
+
 pub fn validate_recipe(config: &CuaConfig, req: &RecipeRequest) -> Result<(), CuaError> {
     if req.steps.is_empty() {
         return Err(CuaError::Invalid("recipe steps must not be empty".into()));
@@ -143,6 +171,100 @@ pub fn validate_recipe(config: &CuaConfig, req: &RecipeRequest) -> Result<(), Cu
             "recipe has {} steps; max is {MAX_RECIPE_STEPS}",
             req.steps.len()
         )));
+    }
+    for step in &req.steps {
+        match step {
+            RecipeStep::Click { x, y, button } | RecipeStep::DoubleClick { x, y, button } => {
+                crate::validate_point(config, *x, *y)?;
+                if let Some(button) = *button {
+                    if !(1..=7).contains(&button) {
+                        return Err(CuaError::Invalid("button must be 1-7".into()));
+                    }
+                }
+            }
+            RecipeStep::Move { x, y } => crate::validate_point(config, *x, *y)?,
+            RecipeStep::Press { x, y, button } => {
+                crate::validate_point(config, *x, *y)?;
+                if let Some(button) = *button {
+                    if !(1..=7).contains(&button) {
+                        return Err(CuaError::Invalid("button must be 1-7".into()));
+                    }
+                }
+            }
+            RecipeStep::Release { x, y, button, path } => {
+                match (x, y) {
+                    (Some(x), Some(y)) => crate::validate_point(config, *x, *y)?,
+                    (None, None) => {}
+                    _ => {
+                        return Err(CuaError::Invalid(
+                            "x and y must both be set or both omitted".into(),
+                        ));
+                    }
+                }
+                if let Some(button) = *button {
+                    if !(1..=7).contains(&button) {
+                        return Err(CuaError::Invalid("button must be 1-7".into()));
+                    }
+                }
+                if let Some(path) = path {
+                    if path.len() > crate::MAX_MOTION_PATH {
+                        return Err(CuaError::Invalid(format!(
+                            "release path has {} points; max is {}",
+                            path.len(),
+                            crate::MAX_MOTION_PATH
+                        )));
+                    }
+                    for point in path {
+                        crate::validate_point(config, point.x, point.y)?;
+                    }
+                }
+            }
+            RecipeStep::Drag {
+                x1,
+                y1,
+                x2,
+                y2,
+                button,
+            } => {
+                crate::validate_point(config, *x1, *y1)?;
+                crate::validate_point(config, *x2, *y2)?;
+                if let Some(button) = *button {
+                    if !(1..=7).contains(&button) {
+                        return Err(CuaError::Invalid("button must be 1-7".into()));
+                    }
+                }
+            }
+            RecipeStep::Type { text } => {
+                if text.is_empty() {
+                    return Err(CuaError::Invalid("text must not be empty".into()));
+                }
+                if text.len() > 16 * 1024 {
+                    return Err(CuaError::Invalid("text is too long".into()));
+                }
+            }
+            RecipeStep::Key { key, action: _ } => {
+                if key.is_empty() {
+                    return Err(CuaError::Invalid("key must not be empty".into()));
+                }
+                if key.chars().any(|c| c.is_whitespace() || c == ';') {
+                    return Err(CuaError::Invalid("key contains invalid characters".into()));
+                }
+            }
+            RecipeStep::Scroll { x, y, dx, dy } => {
+                crate::validate_point(config, *x, *y)?;
+                if *dx == 0 && *dy == 0 {
+                    return Err(CuaError::Invalid("dx and dy must not both be 0".into()));
+                }
+            }
+            RecipeStep::Wait { ms } => {
+                if *ms > MAX_WAIT_MS {
+                    return Err(CuaError::Invalid(format!(
+                        "wait {ms}ms exceeds max {MAX_WAIT_MS}ms"
+                    )));
+                }
+            }
+            RecipeStep::Screenshot {} => {}
+        }
     }
     Ok(())
 }
