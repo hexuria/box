@@ -161,7 +161,7 @@ impl GrokBox {
             let text = String::from_utf8_lossy(&bytes);
             return Err(Error::from_status(status, &text));
         }
-        Ok(bytes)
+        Ok(bytes.to_vec())
     }
 
     pub async fn click(&self, x: i32, y: i32, button: Option<u8>) -> Result<CuaOk, Error> {
@@ -211,6 +211,37 @@ impl GrokBox {
         .await
     }
 
+    pub async fn press(&self, x: i32, y: i32, button: Option<u8>) -> Result<CuaOk, Error> {
+        self.send_json(
+            "POST",
+            &format!("{}/v1/cua/press", self.exec_url),
+            Some(json!({ "x": x, "y": y, "button": button })),
+            true,
+        )
+        .await
+    }
+
+    pub async fn release(
+        &self,
+        x: Option<i32>,
+        y: Option<i32>,
+        button: Option<u8>,
+        path: Option<Vec<(i32, i32)>>,
+    ) -> Result<CuaOk, Error> {
+        let path = path.map(|pts| {
+            pts.into_iter()
+                .map(|(x, y)| json!({ "x": x, "y": y }))
+                .collect::<Vec<_>>()
+        });
+        self.send_json(
+            "POST",
+            &format!("{}/v1/cua/release", self.exec_url),
+            Some(json!({ "x": x, "y": y, "button": button, "path": path })),
+            true,
+        )
+        .await
+    }
+
     pub async fn type_text(&self, text: &str) -> Result<CuaOk, Error> {
         self.send_json(
             "POST",
@@ -222,10 +253,14 @@ impl GrokBox {
     }
 
     pub async fn key(&self, key: &str) -> Result<CuaOk, Error> {
+        self.key_action(key, None).await
+    }
+
+    pub async fn key_action(&self, key: &str, action: Option<&str>) -> Result<CuaOk, Error> {
         self.send_json(
             "POST",
             &format!("{}/v1/cua/key", self.exec_url),
-            Some(json!({ "key": key })),
+            Some(json!({ "key": key, "action": action })),
             true,
         )
         .await
@@ -263,11 +298,11 @@ impl GrokBox {
         let (status, bytes, _) = self
             .send(method, url, body, auth, "application/json")
             .await?;
-        let text = String::from_utf8_lossy(&bytes);
         if !(200..300).contains(&status) {
+            let text = String::from_utf8_lossy(&bytes);
             return Err(Error::from_status(status, &text));
         }
-        serde_json::from_str(&text).map_err(|err| Error::Transport(err.to_string()))
+        serde_json::from_slice(&bytes).map_err(|err| Error::Transport(err.to_string()))
     }
 
     async fn send(
@@ -277,7 +312,7 @@ impl GrokBox {
         body: Option<Value>,
         auth: bool,
         accept: &str,
-    ) -> Result<(u16, Vec<u8>, String), Error> {
+    ) -> Result<(u16, Bytes, String), Error> {
         let uri: Uri = url
             .parse()
             .map_err(|err: hyper::http::uri::InvalidUri| Error::Connect(err.to_string()))?;
@@ -315,8 +350,7 @@ impl GrokBox {
             .collect()
             .await
             .map_err(|err| Error::Transport(err.to_string()))?
-            .to_bytes()
-            .to_vec();
+            .to_bytes();
         Ok((status, bytes, content_type))
     }
 }
