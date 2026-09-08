@@ -120,7 +120,7 @@ cd l1 && cp .env.example .env && npm install && npm run dev          # human wor
 ## Ports
 
 | Port | Published? | Process | Notes |
-| --- | --- | --- | --- |
+| --- | --- | --- |
 | **1337** | host `127.0.0.1` | `box-exec` | exec, files, CUA. Process bind inside the image is `0.0.0.0`. |
 | **1340** | host `127.0.0.1` | `box-host` | health, ready, info, desktop, chrome. |
 | **6080** | host `127.0.0.1` | websockify / noVNC | Viewer. **Not** Bearer-authenticated. |
@@ -161,9 +161,9 @@ Daemons drop `BOX_TOKEN`, `BOX_HOST_TOKEN`, and `BOX_VNC_PASSWORD` from their ow
 ## Layout
 
 ```
-crates/box-common    path jail, bearer compare, error envelope, config, CORS
-crates/box-exec      exec + files + CUA HTTP daemon
-crates/box-host      identity / ready / capabilities / desktop + chrome status
+crates/box-common    path jail, bearer compare, error envelope, config, CORS, optional mimalloc
+crates/box-exec      exec + files + CUA HTTP daemon (`mimalloc` default-on)
+crates/box-host      identity / ready / capabilities / desktop + chrome status (`mimalloc` default-on)
 crates/box-desktop   Xvfb probe, 1280×800 geometry, viewer URL
 crates/box-chrome    Chromium profile + localhost CDP probe
 crates/box-cua       screenshot / click / type / key / scroll / double-click / drag / move / recipe
