@@ -11,7 +11,7 @@ use tower::ServiceExt;
 
 fn state(dir: &TempDir) -> AppState {
     AppState {
-        workspace: dir.path().to_path_buf(),
+        workspace: dir.path().canonicalize().unwrap(),
         token: "secret-token".into(),
         max_file_bytes: 1024 * 1024,
         default_timeout: Duration::from_secs(5),
@@ -249,6 +249,10 @@ async fn cua_type_key_scroll_disabled() {
             "/v1/cua/drag",
             json!({"x1": 10, "y1": 10, "x2": 20, "y2": 20}),
         ),
+        ("/v1/cua/press", json!({"x": 10, "y": 10, "button": 1})),
+        ("/v1/cua/mousedown", json!({"x": 10, "y": 10, "button": 1})),
+        ("/v1/cua/release", json!({"x": 20, "y": 20, "button": 1})),
+        ("/v1/cua/mouseup", json!({"x": 20, "y": 20, "button": 1})),
         (
             "/v1/cua/recipe",
             json!({"steps":[{"op":"move","x":10,"y":10}]}),
@@ -336,6 +340,49 @@ async fn files_mkdir_and_delete() {
 }
 
 #[tokio::test]
+async fn files_rename() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir);
+    let (status, _) = send(
+        s.clone(),
+        auth_json(
+            "PUT",
+            "/v1/files",
+            "secret-token",
+            json!({"path": "old.txt", "content": "x"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = send(
+        s.clone(),
+        auth_json(
+            "POST",
+            "/v1/files/rename",
+            "secret-token",
+            json!({"from": "old.txt", "to": "new.txt"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["to"].as_str().unwrap().ends_with("new.txt"));
+
+    let (status, body) = send(
+        s,
+        Request::builder()
+            .method("GET")
+            .uri("/v1/files?path=new.txt")
+            .header("authorization", "Bearer secret-token")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["content"], "x");
+}
+
+#[tokio::test]
 async fn files_delete_rejects_root() {
     let dir = TempDir::new().unwrap();
     let (status, body) = send(
@@ -372,6 +419,46 @@ async fn exec_strips_box_token_from_child_env() {
     assert_eq!(body["exit_code"], 0);
     assert!(body["stdout"].as_str().unwrap().contains("STRIPPED"));
     assert!(!body["stdout"].as_str().unwrap().contains("LEAKED"));
+}
+
+#[tokio::test]
+async fn exec_sets_default_term() {
+    let dir = TempDir::new().unwrap();
+    let (status, body) = send(
+        state(&dir),
+        auth_json(
+            "POST",
+            "/v1/exec",
+            "secret-token",
+            json!({
+                "command": ["sh", "-c", "printf '%s %s %s' \"$TERM\" \"$COLUMNS\" \"$LINES\""]
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["exit_code"], 0);
+    assert_eq!(body["stdout"], "xterm-256color 120 32");
+}
+
+#[tokio::test]
+async fn exec_env_can_override_term() {
+    let dir = TempDir::new().unwrap();
+    let (status, body) = send(
+        state(&dir),
+        auth_json(
+            "POST",
+            "/v1/exec",
+            "secret-token",
+            json!({
+                "command": ["sh", "-c", "printf '%s' \"$TERM\""],
+                "env": {"TERM": "dumb"}
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["stdout"], "dumb");
 }
 
 #[tokio::test]
