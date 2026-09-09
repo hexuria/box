@@ -2,69 +2,24 @@ use std::path::Path;
 
 use axum::extract::{Query, State};
 use axum::Json;
-use box_common::{resolve_in_jail, ApiError};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
+use box_common::{resolve_in_canonical_jail, ApiError};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 
-mod b64 {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/" ;
+fn b64_encode(input: &[u8]) -> String {
+    BASE64.encode(input)
+}
 
-    pub fn encode(input: &[u8]) -> String {
-        let mut out = String::new();
-        let mut i = 0;
-        while i < input.len() {
-            let b0 = input[i];
-            let b1 = if i + 1 < input.len() { input[i + 1] } else { 0 };
-            let b2 = if i + 2 < input.len() { input[i + 2] } else { 0 };
-            out.push(TABLE[(b0 >> 2) as usize] as char);
-            out.push(TABLE[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
-            if i + 1 < input.len() {
-                out.push(TABLE[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char);
-            } else {
-                out.push('=');
-            }
-            if i + 2 < input.len() {
-                out.push(TABLE[(b2 & 0x3f) as usize] as char);
-            } else {
-                out.push('=');
-            }
-            i += 3;
-        }
-        out
-    }
-
-    pub fn decode(input: &str) -> Result<Vec<u8>, &'static str> {
-        fn val(c: u8) -> Result<u8, &'static str> {
-            match c {
-                b'A'..=b'Z' => Ok(c - b'A'),
-                b'a'..=b'z' => Ok(c - b'a' + 26),
-                b'0'..=b'9' => Ok(c - b'0' + 52),
-                b'+' => Ok(62),
-                b'/' => Ok(63),
-                _ => Err("invalid base64"),
-            }
-        }
-        let filtered: Vec<u8> = input.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
-        if filtered.len() % 4 != 0 {
-            return Err("invalid base64 length");
-        }
-        let mut out = Vec::new();
-        for chunk in filtered.chunks(4) {
-            let pad = chunk.iter().filter(|b| **b == b'=').count();
-            let c0 = val(chunk[0])?;
-            let c1 = val(chunk[1])?;
-            let c2 = if chunk[2] == b'=' { 0 } else { val(chunk[2])? };
-            let c3 = if chunk[3] == b'=' { 0 } else { val(chunk[3])? };
-            out.push((c0 << 2) | (c1 >> 4));
-            if pad < 2 {
-                out.push((c1 << 4) | (c2 >> 2));
-            }
-            if pad < 1 {
-                out.push((c2 << 6) | c3);
-            }
-        }
-        Ok(out)
+fn b64_decode(input: &str) -> Result<Vec<u8>, &'static str> {
+    if input.bytes().any(|b| b.is_ascii_whitespace()) {
+        let mut filtered = Vec::with_capacity(input.len());
+        filtered.extend(input.bytes().filter(|b| !b.is_ascii_whitespace()));
+        BASE64.decode(filtered).map_err(|_| "invalid base64")
+    } else {
+        BASE64.decode(input).map_err(|_| "invalid base64")
     }
 }
 
@@ -80,7 +35,7 @@ pub enum FileGetResponse {
     File {
         path: String,
         size: u64,
-        encoding: String,
+        encoding: &'static str,
         content: String,
     },
     Directory {
@@ -92,7 +47,7 @@ pub enum FileGetResponse {
 #[derive(Debug, Serialize)]
 pub struct DirEntry {
     pub name: String,
-    pub kind: String,
+    pub kind: &'static str,
     pub size: Option<u64>,
 }
 
@@ -134,12 +89,24 @@ pub struct MkdirResponse {
     pub created: bool,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct RenameRequest {
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RenameResponse {
+    pub from: String,
+    pub to: String,
+}
+
 pub async fn get(
     State(state): State<AppState>,
     Query(query): Query<FileQuery>,
 ) -> Result<Json<FileGetResponse>, ApiError> {
     let user_path = query.path.as_deref().unwrap_or("");
-    let resolved = resolve_in_jail(&state.workspace, user_path)?;
+    let resolved = resolve_in_canonical_jail(&state.workspace, user_path)?;
     let meta = tokio::fs::metadata(&resolved).await.map_err(|err| {
         if err.kind() == std::io::ErrorKind::NotFound {
             ApiError::not_found(format!("not found: {}", resolved.display()))
@@ -176,7 +143,7 @@ pub async fn get(
             };
             entries.push(DirEntry {
                 name: entry.file_name().to_string_lossy().into_owned(),
-                kind: kind.to_string(),
+                kind,
                 size,
             });
         }
@@ -198,23 +165,19 @@ pub async fn get(
     let bytes = tokio::fs::read(&resolved)
         .await
         .map_err(|err| ApiError::io(err.to_string()))?;
-    let want = query
-        .encoding
-        .as_deref()
-        .unwrap_or("utf8")
-        .to_ascii_lowercase();
+    let want = query.encoding.as_deref().unwrap_or("utf8");
 
-    let (encoding, content) = match want.as_str() {
-        "base64" => ("base64".to_string(), b64::encode(&bytes)),
-        "utf8" | "text" => match String::from_utf8(bytes.clone()) {
-            Ok(text) => ("utf8".to_string(), text),
-            Err(_) => ("base64".to_string(), b64::encode(&bytes)),
-        },
-        other => {
-            return Err(ApiError::invalid_request(format!(
-                "unsupported encoding '{other}'"
-            )))
+    let (encoding, content) = if want.eq_ignore_ascii_case("base64") {
+        ("base64", b64_encode(&bytes))
+    } else if want.eq_ignore_ascii_case("utf8") || want.eq_ignore_ascii_case("text") {
+        match String::from_utf8(bytes) {
+            Ok(text) => ("utf8", text),
+            Err(err) => ("base64", b64_encode(&err.into_bytes())),
         }
+    } else {
+        return Err(ApiError::invalid_request(format!(
+            "unsupported encoding '{want}'"
+        )));
     };
 
     Ok(Json(FileGetResponse::File {
@@ -232,28 +195,23 @@ pub async fn put(
     if req.path.is_empty() {
         return Err(ApiError::invalid_request("path is required"));
     }
-    let resolved = resolve_in_jail(&state.workspace, &req.path)?;
-    let root = resolve_in_jail(&state.workspace, "")?;
+    let resolved = resolve_in_canonical_jail(&state.workspace, &req.path)?;
+    let root = resolve_in_canonical_jail(&state.workspace, "")?;
     if resolved == root {
         return Err(ApiError::invalid_request(
             "refusing to overwrite the workspace root",
         ));
     }
 
-    let bytes = match req
-        .encoding
-        .as_deref()
-        .unwrap_or("utf8")
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "utf8" | "text" => req.content.into_bytes(),
-        "base64" => b64::decode(&req.content).map_err(ApiError::invalid_request)?,
-        other => {
-            return Err(ApiError::invalid_request(format!(
-                "unsupported encoding '{other}'"
-            )))
-        }
+    let encoding = req.encoding.as_deref().unwrap_or("utf8");
+    let bytes = if encoding.eq_ignore_ascii_case("utf8") || encoding.eq_ignore_ascii_case("text") {
+        req.content.into_bytes()
+    } else if encoding.eq_ignore_ascii_case("base64") {
+        b64_decode(&req.content).map_err(ApiError::invalid_request)?
+    } else {
+        return Err(ApiError::invalid_request(format!(
+            "unsupported encoding '{encoding}'"
+        )));
     };
 
     if bytes.len() as u64 > state.max_file_bytes {
@@ -296,8 +254,8 @@ pub async fn delete(
     if user_path.is_empty() {
         return Err(ApiError::invalid_request("path is required"));
     }
-    let resolved = resolve_in_jail(&state.workspace, user_path)?;
-    let root = resolve_in_jail(&state.workspace, "")?;
+    let resolved = resolve_in_canonical_jail(&state.workspace, user_path)?;
+    let root = resolve_in_canonical_jail(&state.workspace, "")?;
     if resolved == root {
         return Err(ApiError::invalid_request(
             "refusing to delete the workspace root",
@@ -356,8 +314,8 @@ pub async fn mkdir(
     if req.path.is_empty() {
         return Err(ApiError::invalid_request("path is required"));
     }
-    let resolved = resolve_in_jail(&state.workspace, &req.path)?;
-    let root = resolve_in_jail(&state.workspace, "")?;
+    let resolved = resolve_in_canonical_jail(&state.workspace, &req.path)?;
+    let root = resolve_in_canonical_jail(&state.workspace, "")?;
     if resolved == root {
         return Ok(Json(MkdirResponse {
             path: display_under_workspace(&state.workspace, &resolved),
@@ -393,26 +351,62 @@ pub async fn mkdir(
     }))
 }
 
+pub async fn rename(
+    State(state): State<AppState>,
+    Json(req): Json<RenameRequest>,
+) -> Result<Json<RenameResponse>, ApiError> {
+    if req.from.is_empty() || req.to.is_empty() {
+        return Err(ApiError::invalid_request("from and to are required"));
+    }
+    let from = resolve_in_canonical_jail(&state.workspace, &req.from)?;
+    let to = resolve_in_canonical_jail(&state.workspace, &req.to)?;
+    let root = resolve_in_canonical_jail(&state.workspace, "")?;
+    if from == root || to == root {
+        return Err(ApiError::invalid_request(
+            "refusing to rename the workspace root",
+        ));
+    }
+    if !from.exists() {
+        return Err(ApiError::not_found(format!(
+            "not found: {}",
+            from.display()
+        )));
+    }
+    if to.exists() {
+        return Err(ApiError::invalid_request("destination already exists"));
+    }
+    if let Some(parent) = to.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|err| ApiError::io(err.to_string()))?;
+    }
+    tokio::fs::rename(&from, &to)
+        .await
+        .map_err(|err| ApiError::io(err.to_string()))?;
+    Ok(Json(RenameResponse {
+        from: display_under_workspace(&state.workspace, &from),
+        to: display_under_workspace(&state.workspace, &to),
+    }))
+}
+
 fn display_under_workspace(workspace: &Path, resolved: &Path) -> String {
-    let root = workspace
-        .canonicalize()
-        .unwrap_or_else(|_| workspace.to_path_buf());
-    match resolved.strip_prefix(&root) {
-        Ok(rel) if rel.as_os_str().is_empty() => root.display().to_string(),
-        Ok(rel) => format!("{}/{}", root.display(), rel.display()),
+    match resolved.strip_prefix(workspace) {
+        Ok(rel) if rel.as_os_str().is_empty() => workspace.display().to_string(),
+        Ok(rel) => format!("{}/{}", workspace.display(), rel.display()),
         Err(_) => resolved.display().to_string(),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::b64;
+    use super::{b64_decode, b64_encode};
 
     #[test]
     fn base64_roundtrip() {
         let data = b"hello world!";
-        let encoded = b64::encode(data);
-        assert_eq!(b64::decode(&encoded).unwrap(), data);
-        assert_eq!(b64::decode("aGVsbG8=").unwrap(), b"hello");
+        let encoded = b64_encode(data);
+        assert_eq!(b64_decode(&encoded).unwrap(), data);
+        assert_eq!(b64_decode("aGVsbG8=").unwrap(), b"hello");
+        assert_eq!(b64_decode("aGVs\nbG8=").unwrap(), b"hello");
     }
 }
