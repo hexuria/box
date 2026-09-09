@@ -270,3 +270,4 @@ test("planJsonForView copies the on-screen version, not always Edit", () => {
   assert.equal(planJsonForView(planText, edited, "v3"), planText);
   assert.equal(planJsonForView(planText, null, "v1"), planText);
 });
+

@@ -16,7 +16,7 @@ const reset = readFileSync(join(root, "docker/box-reset-desktop.sh"), "utf8");
 test("x11vnc uses XDAMAGE and LAN timing, not slideshow flags", () => {
   assert.match(entry, /x11vnc\s+\\/);
   assert.match(entry, /-xdamage/);
-  assert.doesNotMatch(entry, /-noxriverage/);
+  assert.doesNotMatch(entry, /-noxdamage/);
   assert.match(entry, /-nowireframe/);
   assert.match(entry, /-speeds lan/);
   assert.match(entry, /-wait 10/);
