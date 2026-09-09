@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { AutoRefresh } from "@/components/auto-refresh";
 import { BoxTools } from "@/components/box-tools";
+import { WorkspaceOverflowMenu } from "@/components/delete-workspace";
 import { LoginForm } from "@/components/login-form";
 import { Shell } from "@/components/shell";
 import { WakeButton } from "@/components/wake-button";
@@ -60,7 +61,21 @@ export default async function BoxPage({
     if (err instanceof EnsureboxError && err.status === 404) {
       notFound();
     }
-    throw err;
+    const message = err instanceof Error ? err.message : String(err);
+    return (
+      <Shell authed>
+        <div className="space-y-4">
+          <Link href="/" className="cursor-pointer text-sm text-muted-foreground hover:text-foreground">
+            ← Workspaces
+          </Link>
+          <h1 className="text-2xl font-semibold tracking-tight">Can&apos;t open this workspace</h1>
+          <p className="max-w-xl text-sm leading-6 text-muted-foreground">{message}</p>
+          <p className="text-sm text-muted-foreground">
+            If the workspace cannot be reached, try again in a moment.
+          </p>
+        </div>
+      </Shell>
+    );
   }
 
   const toolsDisabled = box.status !== "ready";
@@ -76,7 +91,7 @@ export default async function BoxPage({
       <div className="space-y-6">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div>
-            <Link href="/" className="text-sm text-zinc-500 hover:text-zinc-800">
+            <Link href="/" className="cursor-pointer text-sm text-muted-foreground hover:text-foreground">
               ← Workspaces
             </Link>
             <h1 className="mt-2 text-2xl font-semibold tracking-tight">{box.name}</h1>
@@ -84,18 +99,19 @@ export default async function BoxPage({
           <div className="flex flex-wrap items-center gap-2">
             <Badge>{humanStatus(box.status)}</Badge>
             <WakeButton id={box.id} status={box.status} />
+            <WorkspaceOverflowMenu id={box.id} name={box.name} />
           </div>
         </div>
 
         {waiting ? (
-          <p className="rounded-lg border border-zinc-200 bg-white p-3 text-sm text-zinc-600">
+          <p className="rounded-lg border border-border bg-card p-3 text-sm text-muted-foreground">
             This workspace is still starting. The page refreshes until it is
             ready.
           </p>
         ) : null}
 
         {asleep ? (
-          <p className="rounded-lg border border-zinc-200 bg-white p-3 text-sm text-zinc-600">
+          <p className="rounded-lg border border-border bg-card p-3 text-sm text-muted-foreground">
             This workspace is offline. Start it to use the shell and desktop.
           </p>
         ) : null}
@@ -107,15 +123,14 @@ export default async function BoxPage({
         ) : null}
 
         {!asleep ? (
-          <p className="text-sm text-zinc-600">
-            Desktop follows the guest screen through EnsureBox CUA (1280×800).
-            Cook does not restart this guest — Desktop stays on the same
-            session. Maximize to use your mouse and keyboard. Record a session
-            to fill the Recipe tab. This client does not open guest viewer ports.
+          <p className="text-sm leading-6 text-muted-foreground">
+            Desktop is a live VNC session through EnsureBox. Teach a task from
+            the expanded view; Cook a plan on Recipe. Cook does not restart this
+            guest — Desktop stays on the same X session.
           </p>
         ) : null}
 
-        <BoxTools id={box.id} disabled={toolsDisabled} />
+        <BoxTools id={box.id} workspaceName={box.name} disabled={toolsDisabled} />
       </div>
     </Shell>
   );

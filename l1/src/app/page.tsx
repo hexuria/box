@@ -1,11 +1,13 @@
 import Link from "next/link";
 import { ConnectionBanner } from "@/components/connection-banner";
 import { CreateBoxForm } from "@/components/create-box-form";
+import { DeleteWorkspaceButton } from "@/components/delete-workspace";
 import { LoginForm } from "@/components/login-form";
 import { Shell } from "@/components/shell";
 import { Badge } from "@/components/ui/badge";
 import {
   Card,
+  CardAction,
   CardContent,
   CardDescription,
   CardHeader,
@@ -64,7 +66,7 @@ export default async function HomePage() {
         <div className="space-y-4">
           <div>
             <h1 className="text-2xl font-semibold tracking-tight">Sign in</h1>
-            <p className="mt-1 max-w-2xl text-sm text-zinc-600">
+            <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">
               This client talks only to EnsureBox. Sign in with the L1 token.
               Guest credentials never reach the browser.
             </p>
@@ -98,10 +100,9 @@ export default async function HomePage() {
       <div className="space-y-6">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Workspaces</h1>
-          <p className="mt-1 max-w-2xl text-sm text-zinc-600">
-            Open a box to drive the Linux desktop (click, type, maximize),
-            record a recipe, or run a one-call plan. Guest tokens never reach
-            this client.
+          <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">
+            Open a box to take over the Linux desktop, teach a task, or cook a
+            one-call plan. Guest tokens never reach this client.
           </p>
         </div>
 
@@ -142,24 +143,28 @@ export default async function HomePage() {
         {boxes.length > 0 ? (
           <div className="grid gap-3">
             {boxes.map((box) => (
-              <Link key={box.id} href={`/boxes/${box.id}`}>
-                <Card className="transition-colors hover:bg-zinc-50">
-                  <CardHeader className="flex flex-row items-start justify-between gap-3">
-                    <div>
-                      <CardTitle>{box.name}</CardTitle>
-                      <CardDescription>{box.id}</CardDescription>
-                    </div>
+              <Card key={box.id}>
+                <CardHeader>
+                  <Link
+                    href={`/boxes/${box.id}`}
+                    className="min-w-0 cursor-pointer rounded-lg outline-none hover:bg-accent focus-visible:ring-3 focus-visible:ring-ring/50"
+                  >
+                    <CardTitle>{box.name}</CardTitle>
+                    <CardDescription>{box.id}</CardDescription>
+                  </Link>
+                  <CardAction className="flex max-w-full flex-wrap items-center justify-end gap-2">
                     <Badge variant={statusVariant(box.status)}>
                       {humanStatus(box.status)}
                     </Badge>
-                  </CardHeader>
-                  {box.error ? (
-                    <CardContent className="text-sm text-destructive">
-                      {box.error}
-                    </CardContent>
-                  ) : null}
-                </Card>
-              </Link>
+                    <DeleteWorkspaceButton id={box.id} name={box.name} />
+                  </CardAction>
+                </CardHeader>
+                {box.error ? (
+                  <CardContent className="text-sm text-destructive">
+                    {box.error}
+                  </CardContent>
+                ) : null}
+              </Card>
             ))}
           </div>
         ) : null}
