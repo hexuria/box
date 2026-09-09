@@ -48,9 +48,11 @@ export type ExecResult = {
 };
 
 export type FileResult = {
+  kind?: string;
   path?: string;
   content?: string;
   encoding?: string;
+  entries?: Array<{ name?: string; kind?: string; size?: number | null }>;
 };
 
 export type ScreenshotResult = {
@@ -60,6 +62,7 @@ export type ScreenshotResult = {
   width?: number;
   height?: number;
   bytes?: number;
+  path?: string;
 };
 
 export type RecipeScreenshotMode = "none" | "end" | "each";
@@ -68,7 +71,20 @@ export type RecipeRequest = {
   name?: string;
   stop_on_error?: boolean;
   screenshot?: RecipeScreenshotMode;
+  record?: boolean;
+  artifact_dir?: string;
   steps: unknown[];
+};
+
+export type RecipeArtifact = {
+  kind?: string;
+  label?: string;
+  path?: string;
+  mime?: string;
+  bytes?: number;
+  width?: number;
+  height?: number;
+  step_index?: number;
 };
 
 export type RecipeStepResult = {
@@ -89,6 +105,8 @@ export type RecipeReceipt = {
   duration_ms?: number;
   steps?: RecipeStepResult[];
   screenshot?: ScreenshotResult;
+  artifacts?: RecipeArtifact[];
+  recording_error?: string;
 };
 
 export type EnsureboxErrorBody = {

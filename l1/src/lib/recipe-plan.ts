@@ -72,6 +72,13 @@ export const RECIPE_OPS: {
     blurb: "Capture mid-plan when screenshot is not already end/each.",
     example: { op: "screenshot" },
   },
+  {
+    op: "reset_desktop",
+    title: "reset_desktop",
+    blurb:
+      "Close every window and leftover job on this guest. Same box — not a Docker restart. Put this first so the next clicks hit an empty desktop.",
+    example: { op: "reset_desktop" },
+  },
 ];
 
 export const SMOKE_RECIPE = stringifyPlan({
