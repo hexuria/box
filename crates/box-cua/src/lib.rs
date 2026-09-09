@@ -1,34 +1,105 @@
 //! Computer Use (CUA) actuators against the box X display.
 //!
-//! This crate talks to Xvfb via `import`/`scrot` and `xdotool`. It never
-//! calls an inference gateway — models live in L4.
+//! Input is in-process XTEST on a persistent X connection (xdotool is a
+//! fallback). Screenshots use GetImage + fast PNG (import/scrot fallback).
+//! This crate never calls an inference gateway — models live in L4.
 
 mod cook_record;
+mod encode;
+mod keys;
 mod recipe;
+mod settle;
+pub(crate) mod x11;
+mod xdotool;
 
 use std::env;
-use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+use arrayvec::ArrayVec;
+use smallvec::SmallVec;
+use tokio::sync::Mutex;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use box_desktop::{parse_geometry, DISPLAY_HEIGHT, DISPLAY_WIDTH};
 use serde::{Deserialize, Serialize};
-use tokio::process::Command;
 
+pub use encode::{bgra_to_rgb, bgra_to_rgb_unchecked, encode_png_rgb, zpixmap_to_rgb};
+pub use keys::{char_to_keysym, parse_key_sequence, KeySeq};
 pub use recipe::{
     run_recipe, validate_recipe, RecipeArtifact, RecipeRequest, RecipeResponse, RecipeScreenshot,
     RecipeStep, RecipeStepResult, MAX_RECIPE_STEPS, MAX_WAIT_MS,
 };
 
+static POINTER_WARMED: AtomicBool = AtomicBool::new(false);
+static ACTUATOR: Mutex<()> = Mutex::const_new(());
+
+/// Gap between mousedown and mouseup for a synthetic click. `xdotool click`
+/// sleeps 100ms; a few milliseconds is enough for tint2/Openbox.
+const CLICK_GAP: Duration = Duration::from_millis(12);
+/// Openbox starts a move grab after ButtonPress; a same-invocation warp is
+/// often dropped. Live press→release from L1 already has a human-scale gap.
+const DRAG_GRAB: Duration = Duration::from_millis(20);
+pub(crate) const MAX_MOTION_PATH: usize = 64;
+/// `drag_waypoints` plus a release path plus one extra coordinate.
+pub(crate) const MAX_COLLECTED_POINTS: usize = MAX_MOTION_PATH + MAX_DRAG_WAYPOINTS;
+/// `drag_waypoints` emits `steps+1` points with `steps` clamped to 8..=24.
+pub(crate) const MAX_DRAG_WAYPOINTS: usize = 25;
+
+/// Warp the pointer once without `--sync`.
+///
+/// xdotool 3.20160805 `xdo_wait_for_mouse_move_from` uses `MAX_TRIES` 500
+/// and `usleep(30000)`: **15s when the warp target is already the pointer**.
+/// Xvfb starts the pointer at the display center (640,400 on 1280×800).
+/// Screenshot does not move it, so the first `mousemove --sync 640 400`
+/// (L1 default click / scroll recipe) waits the full 15s. A non-sync warp
+/// to (16,16) leaves center so a leftover `--sync` guest returns immediately.
+pub async fn warmup_pointer(config: &CuaConfig) {
+    if !config.enabled || POINTER_WARMED.load(Ordering::Relaxed) {
+        return;
+    }
+    for attempt in 0..25 {
+        if !display_up(&config.display) {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue;
+        }
+        let started = Instant::now();
+        let _g = ACTUATOR.lock().await;
+        // Off-center: Xvfb's default pointer is (width/2, height/2), not (0,0).
+        match x11::move_pointer(config, 16, 16).await {
+            Ok(()) => {
+                tracing::info!(
+                    attempt,
+                    ms = started.elapsed().as_millis() as u64,
+                    "cua pointer warmup ok"
+                );
+                POINTER_WARMED.store(true, Ordering::Relaxed);
+                return;
+            }
+            Err(err) => {
+                tracing::warn!(attempt, error = %err, "cua pointer warmup retry");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+    tracing::warn!("cua pointer warmup gave up; first click may be slow");
+}
+
 /// Capability flag name advertised by `box-host`.
 pub const CAPABILITY: &str = "cua";
 
+/// Display geometry for CUA actuators.
+///
+/// Field order packs the `String` then the integers then the flag so there
+/// is no alignment hole between `enabled: bool` and `display`. Not `repr(C)`
+/// (no FFI) and not `packed` (that would unalign the `u32`s).
 #[derive(Clone, Debug)]
 pub struct CuaConfig {
-    pub enabled: bool,
     pub display: String,
     pub width: u32,
     pub height: u32,
+    pub enabled: bool,
 }
 
 impl CuaConfig {
@@ -36,19 +107,19 @@ impl CuaConfig {
         let geom = env::var("BOX_DISPLAY_GEOM").unwrap_or_else(|_| "1280x800x24".into());
         let (width, height) = parse_geometry(&geom).unwrap_or((DISPLAY_WIDTH, DISPLAY_HEIGHT));
         Self {
-            enabled: env_bool("BOX_CUA", true),
             display: env::var("BOX_DISPLAY").unwrap_or_else(|_| ":1".into()),
             width,
             height,
+            enabled: env_bool("BOX_CUA", true),
         }
     }
 
     pub fn disabled() -> Self {
         Self {
-            enabled: false,
             display: ":1".into(),
             width: DISPLAY_WIDTH,
             height: DISPLAY_HEIGHT,
+            enabled: false,
         }
     }
 
@@ -79,6 +150,15 @@ pub struct ClickRequest {
     pub button: Option<u8>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyAction {
+    #[default]
+    Tap,
+    Down,
+    Up,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct TypeRequest {
     pub text: String,
@@ -87,6 +167,23 @@ pub struct TypeRequest {
 #[derive(Debug, Deserialize)]
 pub struct KeyRequest {
     pub key: String,
+    #[serde(default)]
+    pub action: Option<KeyAction>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+pub struct CuaPoint {
+    pub x: i32,
+    pub y: i32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReleaseRequest {
+    pub x: Option<i32>,
+    pub y: Option<i32>,
+    pub button: Option<u8>,
+    #[serde(default)]
+    pub path: Option<Vec<CuaPoint>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -156,11 +253,29 @@ pub fn validate_point(config: &CuaConfig, x: i32, y: i32) -> Result<(), CuaError
 
 pub async fn screenshot_png(config: &CuaConfig) -> Result<Vec<u8>, CuaError> {
     ensure_ready(config)?;
-    let png = capture_png(&config.display).await?;
-    if png.is_empty() {
+    let display = config.display.clone();
+    let width = config.width;
+    let height = config.height;
+    let native = tokio::task::spawn_blocking(move || x11::capture_png(&display, width, height))
+        .await
+        .map_err(|err| CuaError::Tool(format!("screenshot worker: {err}")))?;
+    match native {
+        Ok(png) => check_png(png),
+        Err(err) => {
+            tracing::debug!(error = %err, "native GetImage failed; trying import/scrot");
+            let png = xdotool::capture_png(&config.display).await?;
+            check_png(png)
+        }
+    }
+}
+
+fn check_png(png: Vec<u8>) -> Result<Vec<u8>, CuaError> {
+    if png.len() < 8 {
         return Err(CuaError::Tool("screenshot was empty".into()));
     }
-    if png.len() < 8 || &png[..8] != b"\x89PNG\r\n\x1a\n" {
+    // SAFETY: `len >= 8` from the check above.
+    let sig = unsafe { png.get_unchecked(..8) };
+    if sig != b"\x89PNG\r\n\x1a\n" {
         return Err(CuaError::Tool("screenshot was not a PNG".into()));
     }
     Ok(png)
@@ -198,53 +313,135 @@ pub async fn screenshot(config: &CuaConfig) -> Result<ScreenshotResponse, CuaErr
     Ok(screenshot_from_png(config, png, None, true))
 }
 
-pub async fn click(config: &CuaConfig, req: &ClickRequest) -> Result<OkResponse, CuaError> {
-    ensure_ready(config)?;
-    validate_point(config, req.x, req.y)?;
-    let button = req.button.unwrap_or(1);
+fn validate_button(button: Option<u8>) -> Result<u8, CuaError> {
+    let button = button.unwrap_or(1);
     if !(1..=7).contains(&button) {
         return Err(CuaError::Invalid("button must be 1-7".into()));
     }
-    // No mousemove --sync: Xvfb can block ~15s per click with it.
-    xdotool(
-        config,
-        &[
-            "mousemove",
-            &req.x.to_string(),
-            &req.y.to_string(),
-            "click",
-            &button.to_string(),
-        ],
-    )
-    .await?;
+    Ok(button)
+}
+
+fn validate_key(key: &str) -> Result<(), CuaError> {
+    if key.is_empty() {
+        return Err(CuaError::Invalid("key must not be empty".into()));
+    }
+    if key.chars().any(|c| c.is_whitespace() || c == ';') {
+        return Err(CuaError::Invalid("key contains invalid characters".into()));
+    }
+    Ok(())
+}
+
+/// Never `mousemove --sync` (same-spot XQueryPointer poll = 15s). Never
+/// `xdotool click` (cmd_click sleeps 100ms after the press).
+pub async fn click(config: &CuaConfig, req: &ClickRequest) -> Result<OkResponse, CuaError> {
+    ensure_ready(config)?;
+    validate_point(config, req.x, req.y)?;
+    let button = validate_button(req.button)?;
+    let _g = ACTUATOR.lock().await;
+    x11::pointer_press(config, req.x, req.y, button).await?;
+    tokio::time::sleep(CLICK_GAP).await;
+    x11::button_up(config, button).await?;
+    Ok(OkResponse { ok: true })
+}
+
+pub async fn press(config: &CuaConfig, req: &ClickRequest) -> Result<OkResponse, CuaError> {
+    ensure_ready(config)?;
+    validate_point(config, req.x, req.y)?;
+    let button = validate_button(req.button)?;
+    let _g = ACTUATOR.lock().await;
+    x11::pointer_press(config, req.x, req.y, button).await?;
+    Ok(OkResponse { ok: true })
+}
+
+pub async fn release(config: &CuaConfig, req: &ReleaseRequest) -> Result<OkResponse, CuaError> {
+    release_step(config, req.x, req.y, req.button, req.path.as_deref()).await
+}
+
+pub(crate) async fn release_step(
+    config: &CuaConfig,
+    x: Option<i32>,
+    y: Option<i32>,
+    button: Option<u8>,
+    path: Option<&[CuaPoint]>,
+) -> Result<OkResponse, CuaError> {
+    ensure_ready(config)?;
+    let button = validate_button(button)?;
+    match (x, y) {
+        (Some(x), Some(y)) => validate_point(config, x, y)?,
+        (None, None) => {}
+        _ => {
+            return Err(CuaError::Invalid(
+                "x and y must both be set or both omitted".into(),
+            ));
+        }
+    }
+    if let Some(path) = path {
+        if path.len() > MAX_MOTION_PATH {
+            return Err(CuaError::Invalid(format!(
+                "release path has {} points; max is {MAX_MOTION_PATH}",
+                path.len()
+            )));
+        }
+        for point in path {
+            validate_point(config, point.x, point.y)?;
+        }
+    }
+    let extra = match (x, y) {
+        (Some(px), Some(py)) => Some((px, py)),
+        _ => None,
+    };
+    let _g = ACTUATOR.lock().await;
+    release_inner(config, extra, path, button).await
+}
+
+pub(crate) async fn release_inner(
+    config: &CuaConfig,
+    extra: Option<(i32, i32)>,
+    path: Option<&[CuaPoint]>,
+    button: u8,
+) -> Result<OkResponse, CuaError> {
+    match x11::motion_path_and_release(config, &[], extra, path, button).await {
+        Ok(()) => {}
+        Err(_) => {
+            xdotool::xdotool_owned(config, &pointer_release_args(path, extra, button)).await?;
+        }
+    }
     Ok(OkResponse { ok: true })
 }
 
 pub async fn type_text(config: &CuaConfig, req: &TypeRequest) -> Result<OkResponse, CuaError> {
+    type_text_inner(config, &req.text).await
+}
+
+pub(crate) async fn type_text_inner(
+    config: &CuaConfig,
+    text: &str,
+) -> Result<OkResponse, CuaError> {
     ensure_ready(config)?;
-    if req.text.is_empty() {
+    if text.is_empty() {
         return Err(CuaError::Invalid("text must not be empty".into()));
     }
-    if req.text.len() > 16 * 1024 {
+    if text.len() > 16 * 1024 {
         return Err(CuaError::Invalid("text is too long".into()));
     }
-    xdotool(
-        config,
-        &["type", "--clearmodifiers", "--delay", "1", "--", &req.text],
-    )
-    .await?;
+    let _g = ACTUATOR.lock().await;
+    x11::type_text(config, text).await?;
     Ok(OkResponse { ok: true })
 }
 
 pub async fn key(config: &CuaConfig, req: &KeyRequest) -> Result<OkResponse, CuaError> {
+    key_inner(config, &req.key, req.action.unwrap_or(KeyAction::Tap)).await
+}
+
+pub(crate) async fn key_inner(
+    config: &CuaConfig,
+    key: &str,
+    action: KeyAction,
+) -> Result<OkResponse, CuaError> {
     ensure_ready(config)?;
-    if req.key.is_empty() {
-        return Err(CuaError::Invalid("key must not be empty".into()));
-    }
-    if req.key.chars().any(|c| c.is_whitespace() || c == ';') {
-        return Err(CuaError::Invalid("key contains invalid characters".into()));
-    }
-    xdotool(config, &["key", "--clearmodifiers", &req.key]).await?;
+    validate_key(key)?;
+    let _g = ACTUATOR.lock().await;
+    x11::key(config, key, action).await?;
     Ok(OkResponse { ok: true })
 }
 
@@ -254,76 +451,29 @@ pub async fn scroll(config: &CuaConfig, req: &ScrollRequest) -> Result<OkRespons
     if req.dx == 0 && req.dy == 0 {
         return Err(CuaError::Invalid("dx and dy must not both be 0".into()));
     }
-    // X buttons: 4=up, 5=down, 6=left, 7=right
-    let vertical = match req.dy.cmp(&0) {
-        std::cmp::Ordering::Greater => Some((5_u8, req.dy.unsigned_abs().min(50).max(1))),
-        std::cmp::Ordering::Less => Some((4_u8, req.dy.unsigned_abs().min(50).max(1))),
-        std::cmp::Ordering::Equal => None,
-    };
-    let horizontal = match req.dx.cmp(&0) {
-        std::cmp::Ordering::Greater => Some((7_u8, req.dx.unsigned_abs().min(50).max(1))),
-        std::cmp::Ordering::Less => Some((6_u8, req.dx.unsigned_abs().min(50).max(1))),
-        std::cmp::Ordering::Equal => None,
-    };
-
-    let mut args = vec!["mousemove".into(), req.x.to_string(), req.y.to_string()];
-    if let Some((button, n)) = vertical {
-        args.extend([
-            "click".into(),
-            "--repeat".into(),
-            n.to_string(),
-            "--delay".into(),
-            "1".into(),
-            button.to_string(),
-        ]);
-    }
-    if let Some((button, n)) = horizontal {
-        args.extend([
-            "click".into(),
-            "--repeat".into(),
-            n.to_string(),
-            "--delay".into(),
-            "1".into(),
-            button.to_string(),
-        ]);
-    }
-    xdotool_owned(config, &args).await?;
+    let _g = ACTUATOR.lock().await;
+    x11::scroll(config, req.x, req.y, req.dx, req.dy).await?;
     Ok(OkResponse { ok: true })
 }
 
 pub async fn double_click(config: &CuaConfig, req: &ClickRequest) -> Result<OkResponse, CuaError> {
     ensure_ready(config)?;
     validate_point(config, req.x, req.y)?;
-    let button = req.button.unwrap_or(1);
-    if !(1..=7).contains(&button) {
-        return Err(CuaError::Invalid("button must be 1-7".into()));
-    }
-    xdotool(
-        config,
-        &[
-            "mousemove",
-            &req.x.to_string(),
-            &req.y.to_string(),
-            "click",
-            "--repeat",
-            "2",
-            "--delay",
-            "50",
-            &button.to_string(),
-        ],
-    )
-    .await?;
+    let button = validate_button(req.button)?;
+    let _g = ACTUATOR.lock().await;
+    x11::pointer_press(config, req.x, req.y, button).await?;
+    tokio::time::sleep(CLICK_GAP).await;
+    x11::button_up(config, button).await?;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    x11::button_click(config, button).await?;
     Ok(OkResponse { ok: true })
 }
 
 pub async fn move_pointer(config: &CuaConfig, req: &MoveRequest) -> Result<OkResponse, CuaError> {
     ensure_ready(config)?;
     validate_point(config, req.x, req.y)?;
-    xdotool(
-        config,
-        &["mousemove", &req.x.to_string(), &req.y.to_string()],
-    )
-    .await?;
+    let _g = ACTUATOR.lock().await;
+    x11::move_pointer(config, req.x, req.y).await?;
     Ok(OkResponse { ok: true })
 }
 
@@ -331,26 +481,27 @@ pub async fn drag(config: &CuaConfig, req: &DragRequest) -> Result<OkResponse, C
     ensure_ready(config)?;
     validate_point(config, req.x1, req.y1)?;
     validate_point(config, req.x2, req.y2)?;
-    let button = req.button.unwrap_or(1);
-    if !(1..=7).contains(&button) {
-        return Err(CuaError::Invalid("button must be 1-7".into()));
+    let button = validate_button(req.button)?;
+    let points = drag_waypoints(req.x1, req.y1, req.x2, req.y2);
+    let _g = ACTUATOR.lock().await;
+    // SAFETY: `drag_waypoints` always emits at least the start point.
+    let (x1, y1) = unsafe { *points.get_unchecked(0) };
+    x11::pointer_press(config, x1, y1, button).await?;
+    tokio::time::sleep(DRAG_GRAB).await;
+    match x11::motion_path_and_release(config, &points[1..], None, None, button).await {
+        Ok(()) => {}
+        Err(_) => {
+            let mut args = SmallVec::<[String; 16]>::new();
+            for &(x, y) in points.iter().skip(1) {
+                args.push("mousemove".into());
+                args.push(x.to_string());
+                args.push(y.to_string());
+            }
+            args.push("mouseup".into());
+            args.push(button.to_string());
+            xdotool::xdotool_owned(config, &args).await?;
+        }
     }
-    xdotool(
-        config,
-        &[
-            "mousemove",
-            &req.x1.to_string(),
-            &req.y1.to_string(),
-            "mousedown",
-            &button.to_string(),
-            "mousemove",
-            &req.x2.to_string(),
-            &req.y2.to_string(),
-            "mouseup",
-            &button.to_string(),
-        ],
-    )
-    .await?;
     Ok(OkResponse { ok: true })
 }
 
@@ -376,67 +527,109 @@ fn display_up(display: &str) -> bool {
         .exists()
 }
 
-async fn capture_png(display: &str) -> Result<Vec<u8>, CuaError> {
-    if let Ok(png) = run_capture(
-        Command::new("import")
-            .arg("-display")
-            .arg(display)
-            .arg("-window")
-            .arg("root")
-            .arg("png:-"),
-    )
-    .await
-    {
-        return Ok(png);
-    }
-    let tmp = format!("/tmp/box-cua-{}.png", std::process::id());
-    let status = Command::new("scrot")
-        .env("DISPLAY", display)
-        .arg("-o")
-        .arg(&tmp)
-        .status()
-        .await
-        .map_err(|err| CuaError::Tool(format!("scrot: {err}")))?;
-    if !status.success() {
-        return Err(CuaError::Tool("scrot failed".into()));
-    }
-    let png = tokio::fs::read(&tmp)
-        .await
-        .map_err(|err| CuaError::Tool(err.to_string()))?;
-    let _ = tokio::fs::remove_file(&tmp).await;
-    Ok(png)
+pub(crate) fn pointer_press_args(x: i32, y: i32, button: u8) -> SmallVec<[String; 16]> {
+    smallvec::smallvec![
+        "mousemove".into(),
+        x.to_string(),
+        y.to_string(),
+        "mousedown".into(),
+        button.to_string(),
+    ]
 }
 
-async fn run_capture(cmd: &mut Command) -> Result<Vec<u8>, CuaError> {
-    let out = cmd
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await
-        .map_err(|err| CuaError::Tool(err.to_string()))?;
-    if !out.status.success() || out.stdout.is_empty() {
-        return Err(CuaError::Tool(String::from_utf8_lossy(&out.stderr).into()));
-    }
-    Ok(out.stdout)
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn pointer_click_args(x: i32, y: i32, button: u8) -> SmallVec<[String; 16]> {
+    let mut args = pointer_press_args(x, y, button);
+    args.push("mouseup".into());
+    args.push(button.to_string());
+    args
 }
 
-async fn xdotool(config: &CuaConfig, args: &[&str]) -> Result<(), CuaError> {
-    let out = Command::new("xdotool")
-        .env("DISPLAY", &config.display)
-        .args(args)
-        .output()
-        .await
-        .map_err(|err| CuaError::Tool(format!("xdotool: {err}")))?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        return Err(CuaError::Tool(format!("xdotool failed: {err}")));
+pub(crate) fn pointer_release_args(
+    path: Option<&[CuaPoint]>,
+    extra: Option<(i32, i32)>,
+    button: u8,
+) -> SmallVec<[String; 16]> {
+    let mut args = SmallVec::new();
+    if let Some(path) = path {
+        for point in path {
+            args.push("mousemove".into());
+            args.push(point.x.to_string());
+            args.push(point.y.to_string());
+        }
     }
-    Ok(())
+    if let Some((x, y)) = extra {
+        args.push("mousemove".into());
+        args.push(x.to_string());
+        args.push(y.to_string());
+    }
+    args.push("mouseup".into());
+    args.push(button.to_string());
+    args
 }
 
-async fn xdotool_owned(config: &CuaConfig, args: &[String]) -> Result<(), CuaError> {
-    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    xdotool(config, &refs).await
+/// X11 wheel: 120 units = one notch. Smaller deltas still emit one notch.
+pub fn wheel_ticks(delta: i32) -> u32 {
+    let abs = delta.unsigned_abs();
+    if abs == 0 {
+        return 0;
+    }
+    ((abs + 119) / 120).clamp(1, 12)
+}
+
+pub(crate) fn scroll_args(x: i32, y: i32, dx: i32, dy: i32) -> SmallVec<[String; 16]> {
+    let mut args = smallvec::smallvec!["mousemove".into(), x.to_string(), y.to_string()];
+    fn append_ticks(args: &mut SmallVec<[String; 16]>, button: u8, ticks: u32) {
+        for _ in 0..ticks {
+            args.push("mousedown".into());
+            args.push(button.to_string());
+            args.push("mouseup".into());
+            args.push(button.to_string());
+        }
+    }
+    // X buttons: 4=up, 5=down, 6=left, 7=right
+    if dy != 0 {
+        let button = if dy > 0 { 5_u8 } else { 4_u8 };
+        append_ticks(&mut args, button, wheel_ticks(dy));
+    }
+    if dx != 0 {
+        let button = if dx > 0 { 7_u8 } else { 6_u8 };
+        append_ticks(&mut args, button, wheel_ticks(dx));
+    }
+    args
+}
+
+pub fn drag_waypoints(
+    x1: i32,
+    y1: i32,
+    x2: i32,
+    y2: i32,
+) -> ArrayVec<(i32, i32), MAX_DRAG_WAYPOINTS> {
+    let mut out = ArrayVec::new();
+    if x1 == x2 && y1 == y2 {
+        // SAFETY: capacity is 25; this is the first element.
+        unsafe { out.push_unchecked((x1, y1)) };
+        return out;
+    }
+    let dx = f64::from(x2 - x1);
+    let dy = f64::from(y2 - y1);
+    let dist = (dx * dx + dy * dy).sqrt();
+    // Openbox ignores a single warp while Button1 is held. Always emit
+    // several MotionNotify events, even for a short title-bar drag.
+    let steps = ((dist / 40.0).ceil() as i32).clamp(8, 24);
+    for i in 0..=steps {
+        let t = f64::from(i) / f64::from(steps);
+        let pt = (
+            (f64::from(x1) + dx * t).round() as i32,
+            (f64::from(y1) + dy * t).round() as i32,
+        );
+        // SAFETY: `steps` is 8..=24 so this loop writes at most 25 points.
+        unsafe { out.push_unchecked(pt) };
+    }
+    if let Some(last) = out.last_mut() {
+        *last = (x2, y2);
+    }
+    out
 }
 
 fn env_bool(var: &str, default: bool) -> bool {
@@ -466,10 +659,84 @@ mod tests {
     }
 
     #[test]
+    fn click_args_are_press_release_without_sync() {
+        let args = pointer_click_args(10, 20, 1);
+        assert_eq!(
+            args.as_slice(),
+            ["mousemove", "10", "20", "mousedown", "1", "mouseup", "1"]
+        );
+        assert!(!args.iter().any(|a| a == "--sync"));
+        assert!(!args.iter().any(|a| a == "click"));
+        assert_eq!(
+            pointer_press_args(10, 20, 3).as_slice(),
+            ["mousemove", "10", "20", "mousedown", "3"]
+        );
+    }
+
+    #[test]
+    fn scroll_uses_wheel_press_release_not_xdotool_click() {
+        let args = scroll_args(640, 400, 0, 120);
+        assert_eq!(
+            args.as_slice(),
+            ["mousemove", "640", "400", "mousedown", "5", "mouseup", "5"]
+        );
+        assert!(!args.iter().any(|a| a == "click"));
+        assert!(!args.iter().any(|a| a == "--sync"));
+        assert_eq!(wheel_ticks(120), 1);
+        assert_eq!(wheel_ticks(1), 1);
+        assert_eq!(wheel_ticks(240), 2);
+        assert_eq!(wheel_ticks(-120), 1);
+        let left = scroll_args(10, 10, -120, 0);
+        assert!(left.contains(&"6".into()));
+        assert!(!left.iter().any(|a| a == "click"));
+    }
+
+    #[test]
+    fn drag_waypoints_include_intermediates_and_exact_end() {
+        let points = drag_waypoints(0, 0, 80, 0);
+        assert_eq!(points.first().copied(), Some((0, 0)));
+        assert_eq!(points.last().copied(), Some((80, 0)));
+        assert!(points.len() >= 3);
+        let same = drag_waypoints(10, 10, 10, 10);
+        assert_eq!(same.as_slice(), [(10, 10)]);
+        let short = drag_waypoints(0, 0, 20, 0);
+        assert!(
+            short.len() >= 9,
+            "short drags still need several held moves, got {short:?}"
+        );
+        assert_eq!(short.last().copied(), Some((20, 0)));
+        let release = pointer_release_args(
+            Some(&[CuaPoint { x: 20, y: 20 }, CuaPoint { x: 30, y: 30 }]),
+            Some((40, 50)),
+            1,
+        );
+        assert_eq!(
+            release.as_slice(),
+            [
+                "mousemove",
+                "20",
+                "20",
+                "mousemove",
+                "30",
+                "30",
+                "mousemove",
+                "40",
+                "50",
+                "mouseup",
+                "1"
+            ]
+        );
+        assert!(!release.iter().any(|a| a == "click" || a == "--sync"));
+        let click_up = pointer_release_args(None, None, 1);
+        assert_eq!(click_up.as_slice(), ["mouseup", "1"]);
+    }
+
+    #[test]
     fn disabled_screenshot_errors() {
         let cfg = CuaConfig::disabled();
         let err = futures_error(&cfg);
         assert!(matches!(err, CuaError::Disabled));
+        assert_eq!(std::mem::size_of::<CuaConfig>(), 40);
         assert!(!cfg.capability_ready());
     }
 
