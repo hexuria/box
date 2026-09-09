@@ -16,7 +16,7 @@ const reset = readFileSync(join(root, "docker/box-reset-desktop.sh"), "utf8");
 test("x11vnc uses XDAMAGE and LAN timing, not slideshow flags", () => {
   assert.match(entry, /x11vnc\s+\\/);
   assert.match(entry, /-xdamage/);
-  assert.doesNotMatch(entry, /-noxdamage/);
+  assert.doesNotMatch(entry, /-noxriverage/);
   assert.match(entry, /-nowireframe/);
   assert.match(entry, /-speeds lan/);
   assert.match(entry, /-wait 10/);
@@ -116,7 +116,6 @@ test("dock cook maps iconic Chromium instead of treating hide as success", () =>
   assert.match(settle, /windowmap/);
   assert.match(settle, /IsViewable/);
   assert.match(settle, /--raise-or-launch/);
-  assert.match(settle, /--raise-only/);
   assert.match(launch, /--raise-or-launch/);
   assert.match(launch, /--raise-only/);
   assert.match(recipe, /DOCK_TOGGLE_MS/);

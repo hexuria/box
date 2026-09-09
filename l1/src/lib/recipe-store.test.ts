@@ -210,7 +210,7 @@ test("teach draft stores v1 v2 v3 and library save keeps v3 only", () => {
   const loaded = loadTeachDraft("box-1", storage);
   assert.ok(loaded);
   assert.equal(loaded.id, draft.id);
-  assert.ok(storage.getItem(RECIPE_DRAFTS_STORAGE_KEY)?.includes('"v1"'));
+  assert.ok(storage.getItem(RECIPE_DRAFTS_STORAGE_KEY)?.includes("\"v1\""));
 
   const edited = syncTeachDraftEditor(draft, "recorded", [
     ...draft.v2,
