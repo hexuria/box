@@ -59,7 +59,7 @@ function Result({ value }: { value: unknown }) {
   );
 }
 
-export function BoxTools({ id, disabled }: { id: string; disabled: boolean }) {
+export function BoxTools({ id, workspaceName, disabled }: { id: string; workspaceName?: string; disabled: boolean }) {
   const execBound = execAction.bind(null, id);
   const writeBound = writeFileAction.bind(null, id);
   const readBound = readFileAction.bind(null, id);
@@ -68,6 +68,7 @@ export function BoxTools({ id, disabled }: { id: string; disabled: boolean }) {
   const [readState, readFormAction, readPending] = useActionState(readBound, {});
   const [tab, setTab] = useState("cua");
   const [recipeText, setRecipeText] = useState(SMOKE_RECIPE);
+  const [takeover, setTakeover] = useState(false);
 
   return (
     <Tabs value={tab} onValueChange={(value) => setTab(String(value))}>
@@ -165,11 +166,15 @@ export function BoxTools({ id, disabled }: { id: string; disabled: boolean }) {
       >
         <DesktopViewer
           id={id}
+          workspaceName={workspaceName}
           disabled={disabled}
           active={tab === "cua"}
-          onSendToRecipe={(plan) => {
-            setRecipeText(plan);
+          maximized={takeover}
+          onMaximizedChange={setTakeover}
+          onSendToRecipe={(payload) => {
+            setRecipeText(payload.planJson);
             setTab("recipe");
+            setTakeover(false);
           }}
         />
       </div>
