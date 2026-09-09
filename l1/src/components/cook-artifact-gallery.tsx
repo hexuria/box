@@ -19,10 +19,12 @@ export function CookArtifactGallery({
   boxId,
   artifacts,
   recordingError,
+  media = "both",
 }: {
   boxId: string;
   artifacts: CookArtifact[];
   recordingError?: string | null;
+  media?: "both" | "recording" | "screenshot";
 }) {
   const [open, setOpen] = useState<CookArtifact | null>(null);
   const shots = useMemo(
@@ -33,6 +35,9 @@ export function CookArtifactGallery({
     () => artifacts.filter((item) => item.kind === "recording"),
     [artifacts],
   );
+
+  const showRecording = media !== "screenshot";
+  const showScreenshot = media !== "recording";
 
   if (artifacts.length === 0 && !recordingError) {
     return (
@@ -51,20 +56,27 @@ export function CookArtifactGallery({
 
   return (
     <div className="space-y-3">
-      {recordings.length > 0 ? (
+      {showRecording && recordings.length > 0 ? (
         <div className="space-y-2">
           <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
             Cook recording
           </p>
           {recordings.map((item) => {
             const src = artifactFileUrl(boxId, item.path);
+            const mime =
+              item.mime && item.mime.startsWith("video/")
+                ? item.mime
+                : "video/mp4";
             return (
               <div key={item.path} className="space-y-2">
                 <video
+                  key={src}
                   controls
-                  src={src}
+                  playsInline
+                  preload="metadata"
                   className="w-full max-w-3xl rounded-lg border border-border bg-black"
                 >
+                  <source src={src} type={mime} />
                   Your browser cannot play this cook recording.
                 </video>
                 <div className="flex flex-wrap items-center gap-2">
@@ -84,14 +96,14 @@ export function CookArtifactGallery({
             );
           })}
         </div>
-      ) : recordingError ? (
+      ) : showRecording && recordingError ? (
         <div className="space-y-1 rounded-xl border border-border bg-muted/20 px-3 py-3">
           <p className="text-sm font-medium">No cook recording</p>
           <p className="text-sm text-muted-foreground">{recordingError}</p>
         </div>
       ) : null}
 
-      {shots.length > 0 ? (
+      {showScreenshot && shots.length > 0 ? (
         <div className="space-y-2">
           <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
             Screenshots
@@ -121,13 +133,13 @@ export function CookArtifactGallery({
             })}
           </div>
         </div>
-      ) : (
+      ) : showScreenshot ? (
         <p className="text-sm text-muted-foreground">
           No screenshot file on this receipt. If screenshot was{" "}
           <span className="font-mono">none</span>, that is expected. Otherwise
           the PNG never became an L1-viewable artifact.
         </p>
-      )}
+      ) : null}
 
       <Dialog open={open != null} onOpenChange={(next) => !next && setOpen(null)}>
         <DialogContent className="sm:max-w-4xl" showCloseButton>
