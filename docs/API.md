@@ -137,6 +137,18 @@ Deletes a file or directory inside the jail. The workspace root cannot be delete
 
 `parents` defaults to true. If the directory already exists, `created` is false.
 
+### `POST /v1/files/rename`
+
+```json
+{ "from": "old.txt", "to": "notes/new.txt" }
+```
+
+```json
+{ "from": "/workspace/old.txt", "to": "/workspace/notes/new.txt" }
+```
+
+Both paths are jail-checked. Destination must not already exist. The workspace root cannot be renamed.
+
 ### `POST /v1/cua/screenshot`
 
 Capture the root window of `BOX_DISPLAY` as PNG.
@@ -156,7 +168,7 @@ Capture the root window of `BOX_DISPLAY` as PNG.
 
 **Raw PNG:** `Accept: image/png` or `?format=png`. Body is `image/png` bytes.
 
-`503 cua_disabled` if `BOX_CUA=0`. `503 display_unavailable` if Xvfb is down. `502 cua_backend` if `import`/`scrot` fail.
+`503 cua_disabled` if `BOX_CUA=0`. `503 display_unavailable` if Xvfb is down. `502 cua_backend` if GetImage / `import` / `scrot` fail.
 
 ### `POST /v1/cua/click`
 
@@ -164,7 +176,27 @@ Capture the root window of `BOX_DISPLAY` as PNG.
 { "x": 640, "y": 400, "button": 1 }
 ```
 
-`button` is optional (default 1 = left; X buttons 1–7). `200 {"ok": true}`.
+`button` is optional (default 1 = left; X buttons 1–7). Implemented as non-sync `mousemove` + `mousedown`, a short gap, then `mouseup`. Never `xdotool click` (100ms/press) or `mousemove --sync` (15s stall). `200 {"ok": true}`.
+
+### `POST /v1/cua/press`
+
+Alias: `POST /v1/cua/mousedown`.
+
+```json
+{ "x": 200, "y": 40, "button": 1 }
+```
+
+`mousemove` then `mousedown`. No `mouseup`. Pair with `move` (button still down) and `mouseup`.
+
+### `POST /v1/cua/release`
+
+Alias: `POST /v1/cua/mouseup`.
+
+```json
+{ "x": 500, "y": 200, "button": 1, "path": [{ "x": 220, "y": 40 }, { "x": 400, "y": 120 }] }
+```
+
+Optional motion `path` (max 64 points) then `mouseup`. `x`/`y` must both be set or both omitted.
 
 ### `POST /v1/cua/double-click`
 
@@ -188,7 +220,7 @@ Hover; no button.
 { "x1": 100, "y1": 100, "x2": 400, "y2": 300, "button": 1 }
 ```
 
-Mouse down at (x1,y1), move to (x2,y2), mouse up. Both points must be in range.
+Mouse down at (x1,y1), interpolated `mousemove` events, mouse up at (x2,y2). A short pause after press lets Openbox start a title-bar grab. Both points must be in range.
 
 ### `POST /v1/cua/type`
 
@@ -196,23 +228,23 @@ Mouse down at (x1,y1), move to (x2,y2), mouse up. Both points must be in range.
 { "text": "hello" }
 ```
 
-Typed via xdotool. Rejects empty or oversized payloads.
+Typed via XTEST (xdotool fallback). Rejects empty or oversized payloads.
 
 ### `POST /v1/cua/key`
 
 ```json
-{ "key": "Return" }
+{ "key": "Return", "action": "tap" }
 ```
 
-`key` is an xdotool keysym (`Return`, `Tab`, `ctrl+c`, …). Whitespace and `;` are rejected.
+`key` is an X11 / xdotool keysym (`Return`, `Tab`, `ctrl+c`, `shift`, …). Whitespace and `;` are rejected. `action` is `tap` (default, down+up with modifiers cleared), `down`, or `up`. Do not clear modifiers on `down`/`up` so held Ctrl/Alt/Shift/Super stay held.
 
 ### `POST /v1/cua/scroll`
 
 ```json
-{ "x": 640, "y": 400, "dx": 0, "dy": 3 }
+{ "x": 640, "y": 400, "dx": 0, "dy": 120 }
 ```
 
-Moves to `(x,y)` then emits wheel clicks in one xdotool invocation. Positive `dy` scrolls down; negative up. `dx` is horizontal. At least one of `dx`/`dy` must be non-zero.
+Moves to `(x,y)` then emits wheel **press/release** (X buttons 4–7). Never `xdotool click`. 120 units is one notch (X11); smaller non-zero deltas still emit one notch. Positive `dy` scrolls down; negative up. `dx` is horizontal. At least one of `dx`/`dy` must be non-zero.
 
 ### `POST /v1/cua/recipe`
 
@@ -235,7 +267,7 @@ Many CUA steps in **one** request. The guest lints the plan (empty, too many ste
 }
 ```
 
-`200` is a receipt (`ok`, `ran`, `stopped_at`, `duration_ms`, `steps[]`, optional `screenshot`, `artifacts[]`). When `artifact_dir` is set, PNG/video are workspace files (`path` on the receipt) so a client can fetch them without inline base64. `record: true` captures x11grab from step 0. `reset_desktop` closes guest windows on this X session. A step failure with `stop_on_error: true` is still **200** with `ok: false`. Max 64 steps. Wait max 10s per step.
+`200` is a receipt (`ok`, `ran`, `stopped_at`, `duration_ms`, `steps[]`, optional `screenshot`, `artifacts[]`). When `artifact_dir` is set, PNG/video are workspace files (`path` on the receipt) so a client can fetch them without inline base64. `record: true` starts x11grab **before the first CUA step** and SIGINT-stops after the last (no `-t`), then remuxes the tape to progressive `+faststart` MP4. `reset_desktop` closes guest windows on this X session. A step failure with `stop_on_error: true` is still **200** with `ok: false`. Max 256 steps. Wait max 10s per step. Optional `settle` is `raw` (v1: longer Chromium/page waits), `compressed` (v2/v3 default), or `off`. Keys and typed characters are paced so Chromium can map them. Combined chords are one step (`{ "op": "key", "key": "ctrl+l" }`), not ctrl/l down/up.
 
 ---
 
