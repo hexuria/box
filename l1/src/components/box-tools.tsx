@@ -154,7 +154,15 @@ export function BoxTools({ id, disabled }: { id: string; disabled: boolean }) {
         <Result value={writeState.result} />
       </TabsContent>
 
-      <TabsContent value="cua" className="space-y-3">
+      <div
+        className={
+          tab === "cua"
+            ? "space-y-3"
+            : "pointer-events-none fixed top-0 left-[-1600px] z-[-1] w-[1280px] overflow-hidden opacity-0"
+        }
+        aria-hidden={tab !== "cua"}
+        data-desktop-keepalive=""
+      >
         <DesktopViewer
           id={id}
           disabled={disabled}
@@ -164,9 +172,9 @@ export function BoxTools({ id, disabled }: { id: string; disabled: boolean }) {
             setTab("recipe");
           }}
         />
-      </TabsContent>
+      </div>
 
-      <TabsContent value="recipe" className="space-y-3">
+      <TabsContent value="recipe" className="space-y-3" keepMounted>
         <RecipePanel
           id={id}
           disabled={disabled}
