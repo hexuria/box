@@ -122,6 +122,22 @@ enum CuaCmd {
         #[arg(long)]
         button: Option<u8>,
     },
+    Press {
+        #[arg(long)]
+        x: i32,
+        #[arg(long)]
+        y: i32,
+        #[arg(long)]
+        button: Option<u8>,
+    },
+    Release {
+        #[arg(long)]
+        x: Option<i32>,
+        #[arg(long)]
+        y: Option<i32>,
+        #[arg(long)]
+        button: Option<u8>,
+    },
     Type {
         #[arg(long)]
         text: String,
@@ -129,6 +145,9 @@ enum CuaCmd {
     Key {
         #[arg(long)]
         key: String,
+        /// tap (default), down, or up
+        #[arg(long)]
+        action: Option<String>,
     },
     Scroll {
         #[arg(long)]
@@ -253,8 +272,16 @@ async fn main() -> Result<()> {
                 y2,
                 button,
             } => print_json(&box_client.drag(x1, y1, x2, y2, button).await?)?,
+            CuaCmd::Press { x, y, button } => {
+                print_json(&box_client.press(x, y, button).await?)?;
+            }
+            CuaCmd::Release { x, y, button } => {
+                print_json(&box_client.release(x, y, button, None).await?)?;
+            }
             CuaCmd::Type { text } => print_json(&box_client.type_text(&text).await?)?,
-            CuaCmd::Key { key } => print_json(&box_client.key(&key).await?)?,
+            CuaCmd::Key { key, action } => {
+                print_json(&box_client.key_action(&key, action.as_deref()).await?)?;
+            }
             CuaCmd::Scroll { x, y, dx, dy } => {
                 print_json(&box_client.scroll(x, y, dx, dy).await?)?;
             }
