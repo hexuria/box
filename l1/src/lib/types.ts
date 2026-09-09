@@ -41,16 +41,33 @@ export type ReadyResponse = {
 };
 
 export type ExecResult = {
-  exit_code?: number;
+  exit_code?: number | null;
   stdout?: string;
   stderr?: string;
   timed_out?: boolean;
+  duration_ms?: number;
+  cwd?: string;
+  truncated?: boolean;
+};
+
+export type DirEntry = {
+  name: string;
+  kind: string;
+  size?: number | null;
 };
 
 export type FileResult = {
+  kind?: string;
   path?: string;
   content?: string;
   encoding?: string;
+  size?: number;
+  entries?: DirEntry[];
+  bytes_written?: number;
+  deleted?: boolean;
+  created?: boolean;
+  from?: string;
+  to?: string;
 };
 
 export type ScreenshotResult = {
@@ -60,6 +77,7 @@ export type ScreenshotResult = {
   width?: number;
   height?: number;
   bytes?: number;
+  path?: string;
 };
 
 export type RecipeScreenshotMode = "none" | "end" | "each";
@@ -68,7 +86,21 @@ export type RecipeRequest = {
   name?: string;
   stop_on_error?: boolean;
   screenshot?: RecipeScreenshotMode;
+  record?: boolean;
+  artifact_dir?: string;
+  settle?: "off" | "compressed" | "raw";
   steps: unknown[];
+};
+
+export type RecipeArtifact = {
+  kind?: string;
+  label?: string;
+  path?: string;
+  mime?: string;
+  bytes?: number;
+  width?: number;
+  height?: number;
+  step_index?: number;
 };
 
 export type RecipeStepResult = {
@@ -89,6 +121,8 @@ export type RecipeReceipt = {
   duration_ms?: number;
   steps?: RecipeStepResult[];
   screenshot?: ScreenshotResult;
+  artifacts?: RecipeArtifact[];
+  recording_error?: string;
 };
 
 export type EnsureboxErrorBody = {

@@ -54,6 +54,7 @@ CORS is not permissive. Server-to-server callers are unaffected. Browsers only g
 | PUT | `/v1/files` | Write file (`create_dirs` default true) |
 | DELETE | `/v1/files?path=` | Delete file or directory (`recursive=true` for trees) |
 | POST | `/v1/files/mkdir` | Create directory (`parents` default true) |
+| POST | `/v1/files/rename` | Rename a file or directory (`from`, `to`) |
 
 Every path is jail-checked. The workspace root cannot be overwritten or deleted.
 
@@ -68,23 +69,26 @@ Actuators talk to `DISPLAY=:1` (1280×800, origin top-left). Out-of-range coordi
 | `double-click` | Move + two clicks |
 | `move` | Hover; no button |
 | `drag` | Mouse down at (x1,y1), move to (x2,y2), mouse up |
-| `type` | xdotool type (short key delay) |
-| `key` | xdotool keysym |
-| `scroll` | Move, then wheel repeats in one xdotool invocation |
+| `type` | XTEST type (xdotool fallback) |
+| `key` | X11 keysym |
+| `scroll` | Move, then wheel repeats |
 | **`recipe`** | **Many of the above in one request.** Lint the whole plan, then run sequentially. See [`RECIPES.md`](RECIPES.md). |
 
 ### Recipe (`POST /v1/cua/recipe`)
 
-The caller already knows the choreography (click, type, key, …). One Bearer POST runs it. The pointer is shared, so steps are sequential. Invalid plans (`steps` empty, >64 steps, out-of-range coordinates) return **400** and do not move the mouse.
+The caller already knows the choreography (click, type, key, …). One Bearer POST runs it. The pointer is shared, so steps are sequential. Invalid plans (`steps` empty, >256 steps, out-of-range coordinates) return **400** and do not move the mouse.
 
-Default `screenshot` is `end` (one PNG on the receipt). Use `none` if you will screenshot yourself. `each` is large.
+Default `screenshot` is `end` (one PNG on the receipt, and a file when `artifact_dir` is set). Use `none` if you will screenshot yourself. `each` is large. `record: true` starts ffmpeg/x11grab **before the first CUA step** and SIGINT-stops after the last (no `-t`; that capped tapes at 1s), then remuxes to `+faststart` so OS players and Chrome can play motion. `reset_desktop` closes windows on this display.
 
 ```json
 {
   "name": "search",
   "stop_on_error": true,
   "screenshot": "end",
+  "record": true,
+  "artifact_dir": ".l1/cooks/demo",
   "steps": [
+    { "op": "reset_desktop" },
     { "op": "click", "x": 640, "y": 80 },
     { "op": "type", "text": "hello" },
     { "op": "key", "key": "Return" },

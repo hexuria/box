@@ -109,8 +109,9 @@ export default async function BoxPage({
         {!asleep ? (
           <p className="text-sm text-zinc-600">
             Desktop follows the guest screen through EnsureBox CUA (1280×800).
-            Maximize to use your mouse and keyboard. Record a session to fill
-            the Recipe tab. This client does not open guest viewer ports.
+            Cook does not restart this guest — Desktop stays on the same
+            session. Maximize to use your mouse and keyboard. Record a session
+            to fill the Recipe tab. This client does not open guest viewer ports.
           </p>
         ) : null}
 

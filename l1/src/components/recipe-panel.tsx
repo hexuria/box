@@ -1,12 +1,14 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { recipeAction } from "@/lib/actions";
+import { CookArtifactGallery } from "@/components/cook-artifact-gallery";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import type { CookArtifact } from "@/lib/cook-artifacts";
 import { FRAMEBUFFER } from "@/lib/config";
 import {
   insertStep,
@@ -16,6 +18,8 @@ import {
   typedUrlsPreview,
 } from "@/lib/recipe-plan";
 import type { RecipeReceipt } from "@/lib/types";
+
+const RECORD_COOK_KEY = "l1.cook.record";
 
 function RecipeReceiptView({ receipt }: { receipt: RecipeReceipt }) {
   const steps = receipt.steps ?? [];
@@ -94,20 +98,31 @@ export function RecipePanel({
   const [error, setError] = useState<string | null>(null);
   const [lintFailed, setLintFailed] = useState(false);
   const [receipt, setReceipt] = useState<RecipeReceipt | null>(null);
-  const [shot, setShot] = useState<{
-    png: string;
-    width: number;
-    height: number;
-  } | null>(null);
+  const [artifacts, setArtifacts] = useState<CookArtifact[]>([]);
+  const [recordingError, setRecordingError] = useState<string | null>(null);
+  const [recordCook, setRecordCook] = useState(true);
+
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(RECORD_COOK_KEY);
+      if (stored === "0") {
+        setRecordCook(false);
+      }
+    } catch {
+      // default on
+    }
+  }, []);
 
   async function onRun() {
     setBusy(true);
     setError(null);
     setLintFailed(false);
     setReceipt(null);
+    setArtifacts([]);
+    setRecordingError(null);
     const json = planRef.current;
     try {
-      const next = await recipeAction(id, json);
+      const next = await recipeAction(id, json, { record: recordCook });
       if (next.error) {
         setError(next.error);
         setLintFailed(!!next.lintFailed);
@@ -116,15 +131,8 @@ export function RecipePanel({
       if (next.result) {
         setReceipt(next.result);
       }
-      if (next.png) {
-        setShot({
-          png: next.png,
-          width: next.width ?? FRAMEBUFFER.width,
-          height: next.height ?? FRAMEBUFFER.height,
-        });
-      } else {
-        setShot(null);
-      }
+      setArtifacts(next.artifacts ?? []);
+      setRecordingError(next.recordingError ?? null);
     } finally {
       setBusy(false);
     }
@@ -135,10 +143,13 @@ export function RecipePanel({
   return (
     <div className="space-y-3">
       <p className="text-sm text-zinc-600">
-        One HTTP call runs this plan on the guest ({FRAMEBUFFER.width}×
-        {FRAMEBUFFER.height}, origin top-left). Lint happens first; HTTP 400
-        means nothing moved. Edit the JSON — Run sends whatever is in the box,
-        not the last receipt.
+        Cook runs Computer Use on this same guest ({FRAMEBUFFER.width}×
+        {FRAMEBUFFER.height}, origin top-left) — it does not start a new box.
+        Leaving Desktop keeps that session mounted so post-cook windows stay.
+        Screenshots and an optional cook recording are stored as files you can
+        open here. Put <span className="font-mono">reset_desktop</span> first
+        when you need a clean dock, not a Docker restart. Lint happens first;
+        HTTP 400 means nothing moved.
       </p>
       <div>
         <p className="mb-2 text-xs font-medium uppercase tracking-wide text-zinc-500">
@@ -180,10 +191,28 @@ export function RecipePanel({
         />
         <p className="text-xs text-zinc-500">{preview}</p>
       </div>
-      <div className="flex flex-wrap gap-2">
+      <div className="flex flex-wrap items-center gap-3">
         <Button type="button" disabled={disabled || busy} onClick={() => void onRun()}>
-          {busy ? "Running…" : "Run"}
+          {busy ? "Cooking…" : "Cook"}
         </Button>
+        <label className="flex cursor-pointer items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            className="size-4 accent-zinc-900"
+            checked={recordCook}
+            disabled={busy}
+            onChange={(event) => {
+              const next = event.target.checked;
+              setRecordCook(next);
+              try {
+                window.localStorage.setItem(RECORD_COOK_KEY, next ? "1" : "0");
+              } catch {
+                // ignore
+              }
+            }}
+          />
+          Record cook
+        </label>
         <Button
           type="button"
           variant="outline"
@@ -212,23 +241,12 @@ export function RecipePanel({
         </Alert>
       ) : null}
       {receipt ? <RecipeReceiptView receipt={receipt} /> : null}
-      {shot ? (
-        <div className="space-y-2">
-          <p className="text-xs text-zinc-500">
-            {shot.width}×{shot.height} PNG
-          </p>
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            alt="Recipe end screenshot"
-            src={`data:image/png;base64,${shot.png}`}
-            className="w-full max-w-3xl rounded-lg border border-zinc-200 bg-black"
-          />
-        </div>
-      ) : receipt && !error ? (
-        <p className="text-sm text-zinc-500">
-          No screenshot on this receipt (screenshot: none, or the run stopped
-          before a capture).
-        </p>
+      {receipt || artifacts.length > 0 || recordingError ? (
+        <CookArtifactGallery
+          boxId={id}
+          artifacts={artifacts}
+          recordingError={recordCook ? recordingError : null}
+        />
       ) : null}
     </div>
   );

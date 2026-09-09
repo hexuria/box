@@ -175,8 +175,15 @@ export async function execCommand(
   });
 }
 
-export async function readFile(id: string, filePath: string): Promise<FileResult> {
+export async function readFile(
+  id: string,
+  filePath: string,
+  encoding?: string,
+): Promise<FileResult> {
   const query = new URLSearchParams({ path: filePath });
+  if (encoding) {
+    query.set("encoding", encoding);
+  }
   return request<FileResult>(`/api/v1/boxes/${id}/files?${query.toString()}`);
 }
 
@@ -184,10 +191,18 @@ export async function writeFile(
   id: string,
   filePath: string,
   content: string,
+  encoding?: string,
 ): Promise<FileResult> {
   return request<FileResult>(`/api/v1/boxes/${id}/files`, {
     method: "PUT",
-    body: JSON.stringify({ path: filePath, content }),
+    body: JSON.stringify({ path: filePath, content, encoding }),
+  });
+}
+
+export async function mkdir(id: string, filePath: string, parents = true): Promise<FileResult> {
+  return request<FileResult>(`/api/v1/boxes/${id}/files/mkdir`, {
+    method: "POST",
+    body: JSON.stringify({ path: filePath, parents }),
   });
 }
 

@@ -8,6 +8,13 @@ import { tryGetL1Token } from "./config";
 import * as ensurebox from "./ensurebox";
 import { EnsureboxError } from "./ensurebox";
 import type { RecipeReceipt, RecipeRequest, ScreenshotResult } from "./types";
+import {
+  artifactsFromReceipt,
+  cookArtifactDir,
+  newCookRunId,
+  pngsToPersist,
+  type CookArtifact,
+} from "./cook-artifacts";
 
 function isNextControlFlow(err: unknown): boolean {
   return (
@@ -250,22 +257,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function pngFromShot(shot: ScreenshotResult | undefined): {
-  png?: string;
-  width?: number;
-  height?: number;
-} {
-  if (!shot?.png_base64) {
-    return {};
-  }
-  return {
-    png: shot.png_base64,
-    width: shot.width,
-    height: shot.height,
-  };
-}
-
-/** Drop huge PNGs from the receipt JSON; keep width/height/bytes for the UI dump. */
+/** Drop huge PNGs from the receipt JSON; keep width/height/bytes/path for the UI dump. */
 function omitPng(shot: ScreenshotResult | undefined): ScreenshotResult | undefined {
   if (!shot) {
     return shot;
@@ -274,27 +266,53 @@ function omitPng(shot: ScreenshotResult | undefined): ScreenshotResult | undefin
   return rest;
 }
 
-function sanitizeReceipt(raw: RecipeReceipt): {
-  receipt: RecipeReceipt;
-  png?: string;
-  width?: number;
-  height?: number;
-} {
-  let shot = pngFromShot(raw.screenshot);
-  const steps = (raw.steps ?? []).map((step) => {
-    if (!shot.png) {
-      shot = pngFromShot(step.screenshot);
-    }
-    return { ...step, screenshot: omitPng(step.screenshot) };
-  });
+function sanitizeReceipt(raw: RecipeReceipt): RecipeReceipt {
+  const steps = (raw.steps ?? []).map((step) => ({
+    ...step,
+    screenshot: omitPng(step.screenshot),
+  }));
   return {
-    receipt: {
-      ...raw,
-      steps,
-      screenshot: omitPng(raw.screenshot),
-    },
-    ...shot,
+    ...raw,
+    steps,
+    screenshot: omitPng(raw.screenshot),
   };
+}
+
+async function persistInlinePngs(
+  id: string,
+  dir: string,
+  raw: RecipeReceipt,
+): Promise<CookArtifact[]> {
+  const pending = pngsToPersist(raw);
+  if (pending.length === 0) {
+    return [];
+  }
+  await ensurebox.mkdir(id, dir);
+  const out: CookArtifact[] = [];
+  for (const item of pending) {
+    const path = `${dir}/${item.name}`;
+    try {
+      await ensurebox.writeFile(id, path, item.png, "base64");
+      out.push({
+        kind: "screenshot",
+        label: item.label,
+        path,
+        mime: "image/png",
+        width: item.width,
+        height: item.height,
+        stepIndex: item.stepIndex,
+      });
+    } catch (err) {
+      console.info(
+        JSON.stringify({
+          msg: "l1.cook.artifact.write_failed",
+          path,
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      );
+    }
+  }
+  return out;
 }
 
 function failRecipe(err: unknown): {
@@ -330,15 +348,15 @@ function failRecipe(err: unknown): {
 export async function recipeAction(
   id: string,
   planJson: string,
+  opts?: { record?: boolean },
 ): Promise<{
   error?: string;
   status?: number;
   code?: string;
   lintFailed?: boolean;
   result?: RecipeReceipt;
-  png?: string;
-  width?: number;
-  height?: number;
+  artifacts?: CookArtifact[];
+  recordingError?: string;
 }> {
   try {
     await requireL1Session();
@@ -359,8 +377,13 @@ export async function recipeAction(
         lintFailed: true,
       };
     }
+    const runId = newCookRunId();
+    const artifactDir = cookArtifactDir(runId);
+    const record = opts?.record !== false;
     const body: RecipeRequest = {
       steps: parsed.steps,
+      artifact_dir: artifactDir,
+      record,
     };
     if (typeof parsed.name === "string") {
       body.name = parsed.name;
@@ -376,8 +399,22 @@ export async function recipeAction(
       body.screenshot = parsed.screenshot;
     }
     const raw = await ensurebox.runRecipe(id, body);
-    const { receipt, png, width, height } = sanitizeReceipt(raw);
-    return { result: receipt, png, width, height };
+    let artifacts = artifactsFromReceipt(raw);
+    if (!artifacts.some((item) => item.kind === "screenshot")) {
+      const persisted = await persistInlinePngs(id, artifactDir, raw);
+      artifacts = [...artifacts, ...persisted];
+    }
+    const recordingError =
+      typeof raw.recording_error === "string" && raw.recording_error.trim()
+        ? raw.recording_error
+        : record && !artifacts.some((item) => item.kind === "recording")
+          ? "Cook recording did not land as a playable file. Rebuild grok-box:local so the guest has ffmpeg, then cook again."
+          : undefined;
+    return {
+      result: sanitizeReceipt(raw),
+      artifacts,
+      recordingError,
+    };
   } catch (err) {
     return failRecipe(err);
   }

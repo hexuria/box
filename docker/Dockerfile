@@ -27,8 +27,10 @@ RUN apt-get update \
         xfonts-base \
         fonts-liberation \
         xdotool \
+        wmctrl \
         imagemagick \
         scrot \
+        ffmpeg \
         chromium \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 1000 --shell /bin/bash box \
@@ -40,9 +42,11 @@ RUN apt-get update \
 COPY --from=builder /src/target/release/box-exec /usr/local/bin/box-exec
 COPY --from=builder /src/target/release/box-host /usr/local/bin/box-host
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY docker/box-reset-desktop.sh /usr/local/bin/box-reset-desktop
 COPY docker/chromium-policies.json /etc/chromium/policies/managed/grok-box.json
 COPY docker/chromium-policies.json /etc/opt/chrome/policies/managed/grok-box.json
-RUN chmod 755 /usr/local/bin/entrypoint.sh /usr/local/bin/box-exec /usr/local/bin/box-host
+RUN chmod 755 /usr/local/bin/entrypoint.sh /usr/local/bin/box-exec /usr/local/bin/box-host \
+        /usr/local/bin/box-reset-desktop
 
 ENV WORKSPACE_ROOT=/workspace \
     BOX_EXEC_BIND=0.0.0.0:1337 \

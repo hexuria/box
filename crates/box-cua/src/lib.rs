@@ -3,6 +3,7 @@
 //! This crate talks to Xvfb via `import`/`scrot` and `xdotool`. It never
 //! calls an inference gateway — models live in L4.
 
+mod cook_record;
 mod recipe;
 
 use std::env;
@@ -15,8 +16,8 @@ use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
 pub use recipe::{
-    run_recipe, validate_recipe, RecipeRequest, RecipeResponse, RecipeScreenshot, RecipeStep,
-    RecipeStepResult, MAX_RECIPE_STEPS, MAX_WAIT_MS,
+    run_recipe, validate_recipe, RecipeArtifact, RecipeRequest, RecipeResponse, RecipeScreenshot,
+    RecipeStep, RecipeStepResult, MAX_RECIPE_STEPS, MAX_WAIT_MS,
 };
 
 /// Capability flag name advertised by `box-host`.
@@ -117,8 +118,11 @@ pub struct ScreenshotResponse {
     pub mime: &'static str,
     pub width: u32,
     pub height: u32,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub png_base64: String,
     pub bytes: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -162,16 +166,36 @@ pub async fn screenshot_png(config: &CuaConfig) -> Result<Vec<u8>, CuaError> {
     Ok(png)
 }
 
-pub async fn screenshot(config: &CuaConfig) -> Result<ScreenshotResponse, CuaError> {
-    let png = screenshot_png(config).await?;
-    Ok(ScreenshotResponse {
-        encoding: "base64",
+pub fn screenshot_from_png(
+    config: &CuaConfig,
+    png: Vec<u8>,
+    path: Option<String>,
+    inline: bool,
+) -> ScreenshotResponse {
+    let bytes = png.len();
+    let png_base64 = if inline {
+        BASE64.encode(&png)
+    } else {
+        String::new()
+    };
+    ScreenshotResponse {
+        encoding: if path.is_some() && !inline {
+            "file"
+        } else {
+            "base64"
+        },
         mime: "image/png",
         width: config.width,
         height: config.height,
-        bytes: png.len(),
-        png_base64: BASE64.encode(&png),
-    })
+        bytes,
+        png_base64,
+        path,
+    }
+}
+
+pub async fn screenshot(config: &CuaConfig) -> Result<ScreenshotResponse, CuaError> {
+    let png = screenshot_png(config).await?;
+    Ok(screenshot_from_png(config, png, None, true))
 }
 
 pub async fn click(config: &CuaConfig, req: &ClickRequest) -> Result<OkResponse, CuaError> {
@@ -242,11 +266,7 @@ pub async fn scroll(config: &CuaConfig, req: &ScrollRequest) -> Result<OkRespons
         std::cmp::Ordering::Equal => None,
     };
 
-    let mut args = vec![
-        "mousemove".into(),
-        req.x.to_string(),
-        req.y.to_string(),
-    ];
+    let mut args = vec!["mousemove".into(), req.x.to_string(), req.y.to_string()];
     if let Some((button, n)) = vertical {
         args.extend([
             "click".into(),
@@ -301,11 +321,7 @@ pub async fn move_pointer(config: &CuaConfig, req: &MoveRequest) -> Result<OkRes
     validate_point(config, req.x, req.y)?;
     xdotool(
         config,
-        &[
-            "mousemove",
-            &req.x.to_string(),
-            &req.y.to_string(),
-        ],
+        &["mousemove", &req.x.to_string(), &req.y.to_string()],
     )
     .await?;
     Ok(OkResponse { ok: true })

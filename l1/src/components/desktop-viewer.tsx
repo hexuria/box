@@ -388,8 +388,11 @@ export function DesktopViewer({
       <p className="text-sm text-zinc-600">
         This is the guest framebuffer ({FRAMEBUFFER.width}×{FRAMEBUFFER.height}),
         not a raw viewer port. Click the picture to click. In Maximize, your
-        keyboard and scroll wheel go to the box. Record a session to fill the
-        Recipe tab — no model required.
+        keyboard and scroll wheel go to the box. Recipes still cook through
+        Computer Use on the same desktop. Leaving this tab no longer drops the
+        session, so post-cook windows are still on this guest when you come
+        back. Cook screenshots and recordings open on Recipe — they are not a
+        second desktop.
       </p>
       {toolbar}
       <p className="text-xs text-zinc-500">{status}</p>

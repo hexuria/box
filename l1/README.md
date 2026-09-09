@@ -43,9 +43,9 @@ Open [http://127.0.0.1:43141](http://127.0.0.1:43141) and sign in with `L1_TOKEN
 
 Auth: pages and server actions require `L1_TOKEN` (httpOnly cookie after login). The L1 server calls EnsureBox with `Authorization: Bearer <ENSUREBOX_TOKEN>`. That token belongs to the demo L2 API, not to a guest, and is never sent to the browser.
 
-Desktop is a live screenshot of the guest (click, type, scroll, drag, maximize). L1 does not link guest noVNC ports or show a VNC password. **Record to recipe** turns your session into Plan JSON.
+Desktop is a live screenshot of the guest (click, type, scroll, drag, maximize). Cook does not start a new guest; leaving Desktop keeps that same session mounted so post-cook windows are still there when you come back. L1 does not link guest noVNC ports or show a VNC password. **Record to recipe** turns your session into Plan JSON.
 
-The Recipe tab lists every CUA op (`click`, `type`, `key`, `scroll`, `wait`, …). Edit Plan JSON and press Run — that string is what is sent. The guest image must include `/v1/cua/recipe`: rebuild with `docker compose build` or EnsureBox create will start an old `grok-box:local`.
+The Recipe tab lists every CUA op (`click`, `type`, `key`, `scroll`, `wait`, `reset_desktop`, …). **Record cook** (on by default) captures the framebuffer from step 0; screenshots and the video open in the Recipe gallery. `reset_desktop` closes windows on this guest without restarting Docker. Edit Plan JSON and press Run — that string is what is sent. The guest image must include `/v1/cua/recipe` plus ffmpeg: rebuild with `docker compose build` or EnsureBox create will start an old `grok-box:local`.
 
 ## Environment
 

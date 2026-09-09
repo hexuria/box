@@ -7,18 +7,24 @@
 //!
 //! The pointer is shared, so steps are sequential. There is no parallel CUA.
 
-use std::time::Instant;
+use std::env;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use tokio::process::Command;
 
+use crate::cook_record::{recording_mime, start_cook_recorder, stop_cook_recorder, CookRecorder};
 use crate::{
-    click, double_click, drag, key, move_pointer, screenshot, scroll, type_text, ClickRequest,
-    CuaConfig, CuaError, DragRequest, KeyRequest, MoveRequest, ScreenshotResponse, ScrollRequest,
-    TypeRequest,
+    click, double_click, drag, key, move_pointer, screenshot_from_png, screenshot_png, scroll,
+    type_text, ClickRequest, CuaConfig, CuaError, DragRequest, KeyRequest, MoveRequest,
+    ScreenshotResponse, ScrollRequest, TypeRequest,
 };
 
 pub const MAX_RECIPE_STEPS: usize = 64;
 pub const MAX_WAIT_MS: u64 = 10_000;
+const RESET_DESKTOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -73,6 +79,9 @@ pub enum RecipeStep {
         ms: u64,
     },
     Screenshot {},
+    /// Close guest windows and leftover jobs. Same X/VNC session; not docker restart.
+    #[serde(alias = "reset")]
+    ResetDesktop {},
 }
 
 impl RecipeStep {
@@ -87,6 +96,7 @@ impl RecipeStep {
             Self::Scroll { .. } => "scroll",
             Self::Wait { .. } => "wait",
             Self::Screenshot {} => "screenshot",
+            Self::ResetDesktop {} => "reset_desktop",
         }
     }
 }
@@ -101,7 +111,27 @@ pub struct RecipeRequest {
     pub stop_on_error: Option<bool>,
     #[serde(default)]
     pub screenshot: Option<RecipeScreenshot>,
+    /// Capture the framebuffer with ffmpeg/x11grab from step 0 until the cook ends.
+    #[serde(default)]
+    pub record: Option<bool>,
+    /// Workspace-relative or `/workspace/...` dir for PNG/video files. When set,
+    /// screenshot JSON omits `png_base64` (path only) so L1 can show artifacts.
+    #[serde(default)]
+    pub artifact_dir: Option<String>,
     pub steps: Vec<RecipeStep>,
+}
+
+impl Default for RecipeRequest {
+    fn default() -> Self {
+        Self {
+            name: None,
+            stop_on_error: None,
+            screenshot: None,
+            record: None,
+            artifact_dir: None,
+            steps: Vec::new(),
+        }
+    }
 }
 
 impl RecipeRequest {
@@ -111,6 +141,10 @@ impl RecipeRequest {
 
     pub fn screenshot_mode(&self) -> RecipeScreenshot {
         self.screenshot.unwrap_or_default()
+    }
+
+    pub fn record(&self) -> bool {
+        self.record.unwrap_or(false)
     }
 }
 
@@ -127,6 +161,21 @@ pub struct RecipeStepResult {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct RecipeArtifact {
+    pub kind: &'static str,
+    pub label: String,
+    pub path: String,
+    pub mime: &'static str,
+    pub bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step_index: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct RecipeResponse {
     pub ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -138,6 +187,155 @@ pub struct RecipeResponse {
     pub steps: Vec<RecipeStepResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub screenshot: Option<ScreenshotResponse>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<RecipeArtifact>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recording_error: Option<String>,
+}
+
+struct ArtifactSink {
+    dir: PathBuf,
+    inline_png: bool,
+}
+
+impl ArtifactSink {
+    async fn save_png(
+        &self,
+        config: &CuaConfig,
+        name: &str,
+        png: &[u8],
+    ) -> Result<ScreenshotResponse, CuaError> {
+        tokio::fs::create_dir_all(&self.dir)
+            .await
+            .map_err(|err| CuaError::Tool(format!("artifact dir: {err}")))?;
+        let dest = self.dir.join(name);
+        match tokio::fs::write(&dest, png).await {
+            Ok(()) => Ok(screenshot_from_png(
+                config,
+                png.to_vec(),
+                Some(display_workspace_path(&dest)),
+                self.inline_png,
+            )),
+            Err(err) => {
+                tracing::warn!(error = %err, path = %dest.display(), "artifact png write failed; inlining");
+                Ok(screenshot_from_png(config, png.to_vec(), None, true))
+            }
+        }
+    }
+}
+
+fn workspace_root() -> PathBuf {
+    env::var("WORKSPACE_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            if Path::new("/workspace").is_dir() {
+                PathBuf::from("/workspace")
+            } else {
+                PathBuf::from("./workspace-data")
+            }
+        })
+}
+
+fn display_workspace_path(path: &Path) -> String {
+    let root = workspace_root();
+    match path.strip_prefix(&root) {
+        Ok(rel) => format!("/workspace/{}", rel.display()),
+        Err(_) => path.display().to_string(),
+    }
+}
+
+fn resolve_artifact_dir(raw: &str) -> Result<PathBuf, CuaError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(CuaError::Invalid("artifact_dir must not be empty".into()));
+    }
+    if trimmed.contains('\0') || trimmed.split('/').any(|part| part == "..") {
+        return Err(CuaError::Invalid(
+            "artifact_dir must stay inside the workspace".into(),
+        ));
+    }
+    let root = workspace_root();
+    let path = Path::new(trimmed);
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    };
+    let root_norm = root.to_string_lossy().trim_end_matches('/').to_string();
+    let joined_norm = joined.to_string_lossy().to_string();
+    if joined_norm != root_norm && !joined_norm.starts_with(&format!("{root_norm}/")) {
+        return Err(CuaError::Invalid(
+            "artifact_dir must stay inside the workspace".into(),
+        ));
+    }
+    Ok(joined)
+}
+
+fn default_artifact_dir() -> PathBuf {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    workspace_root()
+        .join(".l1/cooks")
+        .join(format!("cook-{stamp}"))
+}
+
+fn artifact_from_shot(
+    shot: &ScreenshotResponse,
+    label: &str,
+    step_index: Option<usize>,
+) -> Option<RecipeArtifact> {
+    let path = shot.path.as_ref()?;
+    Some(RecipeArtifact {
+        kind: "screenshot",
+        label: label.to_string(),
+        path: path.clone(),
+        mime: "image/png",
+        bytes: shot.bytes as u64,
+        width: Some(shot.width),
+        height: Some(shot.height),
+        step_index,
+    })
+}
+
+async fn capture_shot(
+    config: &CuaConfig,
+    sink: Option<&ArtifactSink>,
+    name: &str,
+) -> Result<ScreenshotResponse, CuaError> {
+    let png = screenshot_png(config).await?;
+    if let Some(sink) = sink {
+        sink.save_png(config, name, &png).await
+    } else {
+        Ok(screenshot_from_png(config, png, None, true))
+    }
+}
+
+async fn reset_desktop(config: &CuaConfig) -> Result<(), CuaError> {
+    let child = Command::new("box-reset-desktop")
+        .env("DISPLAY", &config.display)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|err| {
+            CuaError::Tool(format!(
+                "reset_desktop: box-reset-desktop is missing ({err}). Rebuild grok-box:local."
+            ))
+        })?;
+    match tokio::time::timeout(RESET_DESKTOP_TIMEOUT, child.wait_with_output()).await {
+        Ok(Ok(out)) => {
+            if out.status.success() {
+                Ok(())
+            } else {
+                let err = String::from_utf8_lossy(&out.stderr);
+                Err(CuaError::Tool(format!("reset_desktop failed: {err}")))
+            }
+        }
+        Ok(Err(err)) => Err(CuaError::Tool(format!("reset_desktop: {err}"))),
+        Err(_) => Err(CuaError::Tool("reset_desktop timed out after 8s".into())),
+    }
 }
 
 pub fn validate_recipe(config: &CuaConfig, req: &RecipeRequest) -> Result<(), CuaError> {
@@ -149,6 +347,9 @@ pub fn validate_recipe(config: &CuaConfig, req: &RecipeRequest) -> Result<(), Cu
             "recipe has {} steps; max is {MAX_RECIPE_STEPS}",
             req.steps.len()
         )));
+    }
+    if let Some(dir) = req.artifact_dir.as_deref() {
+        resolve_artifact_dir(dir)?;
     }
     for step in &req.steps {
         match step {
@@ -205,7 +406,7 @@ pub fn validate_recipe(config: &CuaConfig, req: &RecipeRequest) -> Result<(), Cu
                     )));
                 }
             }
-            RecipeStep::Screenshot {} => {}
+            RecipeStep::Screenshot {} | RecipeStep::ResetDesktop {} => {}
         }
     }
     Ok(())
@@ -218,10 +419,49 @@ pub async fn run_recipe(
     validate_recipe(config, req)?;
     crate::ensure_ready(config)?;
 
+    let sink = if req.record() || req.artifact_dir.is_some() {
+        let dir = if let Some(raw) = req.artifact_dir.as_deref() {
+            resolve_artifact_dir(raw)?
+        } else {
+            default_artifact_dir()
+        };
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .map_err(|err| CuaError::Tool(format!("artifact dir: {err}")))?;
+        Some(ArtifactSink {
+            dir,
+            inline_png: false,
+        })
+    } else {
+        None
+    };
+
+    let mut recorder: Option<CookRecorder> = None;
+    let mut recording_error = None;
+    if req.record() {
+        if let Some(sink) = sink.as_ref() {
+            match start_cook_recorder(
+                &config.display,
+                config.width,
+                config.height,
+                sink.dir.join("cook.mp4"),
+            )
+            .await
+            {
+                Ok(rec) => recorder = Some(rec),
+                Err(err) => {
+                    tracing::warn!(error = %err, "cook recording did not start");
+                    recording_error = Some(err.to_string());
+                }
+            }
+        }
+    }
+
     let started = Instant::now();
     let stop_on_error = req.stop_on_error();
     let shot_mode = req.screenshot_mode();
     let mut steps = Vec::with_capacity(req.steps.len());
+    let mut artifacts = Vec::new();
     let mut ok = true;
     let mut stopped_at = None;
 
@@ -230,16 +470,42 @@ pub async fn run_recipe(
         let result = run_step(config, step).await;
         let ms = step_started.elapsed().as_millis() as u64;
         match result {
-            Ok(maybe_shot) => {
-                let screenshot = if maybe_shot.is_some() {
-                    maybe_shot
-                } else if shot_mode == RecipeScreenshot::Each
-                    && !matches!(step, RecipeStep::Wait { .. })
-                {
-                    screenshot(config).await.ok()
+            Ok(()) => {
+                let want_shot = matches!(step, RecipeStep::Screenshot {})
+                    || (shot_mode == RecipeScreenshot::Each
+                        && !matches!(step, RecipeStep::Wait { .. }));
+                let screenshot = if want_shot {
+                    match capture_shot(config, sink.as_ref(), &format!("step-{index:02}.png")).await
+                    {
+                        Ok(shot) => Some(shot),
+                        Err(err) if matches!(step, RecipeStep::Screenshot {}) => {
+                            ok = false;
+                            steps.push(RecipeStepResult {
+                                index,
+                                op: step.op_name().into(),
+                                ok: false,
+                                ms,
+                                error: Some(err.to_string()),
+                                screenshot: None,
+                            });
+                            if stop_on_error {
+                                stopped_at = Some(index);
+                                break;
+                            }
+                            continue;
+                        }
+                        Err(_) => None,
+                    }
                 } else {
                     None
                 };
+                if let Some(shot) = screenshot.as_ref() {
+                    if let Some(art) =
+                        artifact_from_shot(shot, &format!("step {index}"), Some(index))
+                    {
+                        artifacts.push(art);
+                    }
+                }
                 steps.push(RecipeStepResult {
                     index,
                     op: step.op_name().into(),
@@ -269,8 +535,13 @@ pub async fn run_recipe(
 
     let mut final_shot = None;
     if ok && shot_mode == RecipeScreenshot::End {
-        match screenshot(config).await {
-            Ok(shot) => final_shot = Some(shot),
+        match capture_shot(config, sink.as_ref(), "end.png").await {
+            Ok(shot) => {
+                if let Some(art) = artifact_from_shot(&shot, "end", None) {
+                    artifacts.push(art);
+                }
+                final_shot = Some(shot);
+            }
             Err(err) => {
                 ok = false;
                 steps.push(RecipeStepResult {
@@ -286,6 +557,32 @@ pub async fn run_recipe(
         }
     }
 
+    if let Some(rec) = recorder.take() {
+        let rec_path = rec.path.clone();
+        match stop_cook_recorder(rec).await {
+            Ok(path) => {
+                let bytes = tokio::fs::metadata(&path)
+                    .await
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                artifacts.push(RecipeArtifact {
+                    kind: "recording",
+                    label: "cook".into(),
+                    path: display_workspace_path(&path),
+                    mime: recording_mime(&path),
+                    bytes,
+                    width: Some(config.width),
+                    height: Some(config.height),
+                    step_index: None,
+                });
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, path = %rec_path.display(), "cook recording stop failed");
+                recording_error = Some(err.to_string());
+            }
+        }
+    }
+
     Ok(RecipeResponse {
         ok,
         name: req.name.clone(),
@@ -294,13 +591,12 @@ pub async fn run_recipe(
         duration_ms: started.elapsed().as_millis() as u64,
         steps,
         screenshot: final_shot,
+        artifacts,
+        recording_error,
     })
 }
 
-async fn run_step(
-    config: &CuaConfig,
-    step: &RecipeStep,
-) -> Result<Option<ScreenshotResponse>, CuaError> {
+async fn run_step(config: &CuaConfig, step: &RecipeStep) -> Result<(), CuaError> {
     match step {
         RecipeStep::Click { x, y, button } => {
             click(
@@ -312,7 +608,6 @@ async fn run_step(
                 },
             )
             .await?;
-            Ok(None)
         }
         RecipeStep::DoubleClick { x, y, button } => {
             double_click(
@@ -324,11 +619,9 @@ async fn run_step(
                 },
             )
             .await?;
-            Ok(None)
         }
         RecipeStep::Move { x, y } => {
             move_pointer(config, &MoveRequest { x: *x, y: *y }).await?;
-            Ok(None)
         }
         RecipeStep::Drag {
             x1,
@@ -348,11 +641,9 @@ async fn run_step(
                 },
             )
             .await?;
-            Ok(None)
         }
         RecipeStep::Type { text } => {
             type_text(config, &TypeRequest { text: text.clone() }).await?;
-            Ok(None)
         }
         RecipeStep::Key { key: keysym } => {
             key(
@@ -362,7 +653,6 @@ async fn run_step(
                 },
             )
             .await?;
-            Ok(None)
         }
         RecipeStep::Scroll { x, y, dx, dy } => {
             scroll(
@@ -375,16 +665,18 @@ async fn run_step(
                 },
             )
             .await?;
-            Ok(None)
         }
         RecipeStep::Wait { ms } => {
             if *ms > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(*ms)).await;
             }
-            Ok(None)
         }
-        RecipeStep::Screenshot {} => Ok(Some(screenshot(config).await?)),
+        RecipeStep::Screenshot {} => {}
+        RecipeStep::ResetDesktop {} => {
+            reset_desktop(config).await?;
+        }
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -400,10 +692,8 @@ mod tests {
     #[test]
     fn rejects_empty() {
         let req = RecipeRequest {
-            name: None,
-            stop_on_error: None,
-            screenshot: None,
             steps: vec![],
+            ..RecipeRequest::default()
         };
         assert!(matches!(
             validate_recipe(&cfg(), &req),
@@ -415,10 +705,9 @@ mod tests {
     fn rejects_too_many_steps() {
         let step = RecipeStep::Wait { ms: 1 };
         let req = RecipeRequest {
-            name: None,
-            stop_on_error: None,
             screenshot: Some(RecipeScreenshot::None),
             steps: vec![step; MAX_RECIPE_STEPS + 1],
+            ..RecipeRequest::default()
         };
         assert!(validate_recipe(&cfg(), &req).is_err());
     }
@@ -426,8 +715,6 @@ mod tests {
     #[test]
     fn rejects_out_of_range_before_run() {
         let req = RecipeRequest {
-            name: None,
-            stop_on_error: None,
             screenshot: Some(RecipeScreenshot::None),
             steps: vec![
                 RecipeStep::Move { x: 0, y: 0 },
@@ -437,6 +724,7 @@ mod tests {
                     button: None,
                 },
             ],
+            ..RecipeRequest::default()
         };
         assert!(matches!(
             validate_recipe(&cfg(), &req),
@@ -447,12 +735,11 @@ mod tests {
     #[test]
     fn rejects_long_wait() {
         let req = RecipeRequest {
-            name: None,
-            stop_on_error: None,
             screenshot: Some(RecipeScreenshot::None),
             steps: vec![RecipeStep::Wait {
                 ms: MAX_WAIT_MS + 1,
             }],
+            ..RecipeRequest::default()
         };
         assert!(validate_recipe(&cfg(), &req).is_err());
     }
@@ -465,6 +752,36 @@ mod tests {
         let step: RecipeStep =
             serde_json::from_str(r#"{"op":"double_click","x":1,"y":2}"#).unwrap();
         assert!(matches!(step, RecipeStep::DoubleClick { .. }));
+    }
+
+    #[test]
+    fn parses_reset_desktop_aliases() {
+        let step: RecipeStep = serde_json::from_str(r#"{"op":"reset_desktop"}"#).unwrap();
+        assert!(matches!(step, RecipeStep::ResetDesktop {}));
+        let step: RecipeStep = serde_json::from_str(r#"{"op":"reset"}"#).unwrap();
+        assert!(matches!(step, RecipeStep::ResetDesktop {}));
+        assert_eq!(step.op_name(), "reset_desktop");
+    }
+
+    #[test]
+    fn rejects_artifact_dir_escape() {
+        let req = RecipeRequest {
+            artifact_dir: Some("../etc".into()),
+            steps: vec![RecipeStep::Wait { ms: 1 }],
+            ..RecipeRequest::default()
+        };
+        assert!(validate_recipe(&cfg(), &req).is_err());
+    }
+
+    #[test]
+    fn accepts_workspace_artifact_dir() {
+        let req = RecipeRequest {
+            artifact_dir: Some(".l1/cooks/demo".into()),
+            record: Some(true),
+            steps: vec![RecipeStep::ResetDesktop {}, RecipeStep::Wait { ms: 1 }],
+            ..RecipeRequest::default()
+        };
+        assert!(validate_recipe(&cfg(), &req).is_ok());
     }
 
     #[test]
@@ -487,6 +804,7 @@ mod tests {
                 },
                 RecipeStep::Wait { ms: 50 },
             ],
+            ..RecipeRequest::default()
         };
         assert!(validate_recipe(&cfg(), &req).is_ok());
     }
