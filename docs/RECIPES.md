@@ -42,7 +42,9 @@ There was **no** preceding batch/recipe endpoint on this guest. Single-op CUA (i
 }
 ```
 
-The guest **lints the whole plan first** (empty, >64 steps, out-of-range coordinates, bad keys). If lint fails, **nothing** moves. Then it runs in order. Default screenshot is `end` (one PNG on the receipt). `none` skips it. `each` attaches a PNG after every non-wait step (heavy).
+The guest **lints the whole plan first** (empty, >64 steps, out-of-range coordinates, bad keys). If lint fails, **nothing** moves. Then it runs in order. Default screenshot is `end` (one PNG on the receipt, and a file under `artifact_dir` when that field is set). `none` skips it. `each` attaches a PNG after every non-wait step (heavy).
+
+`record: true` starts ffmpeg/x11grab on the same X display **before step 0** and stops when the cook ends. The video is a guest file (`cook.mp4`), not a new VNC session. `reset_desktop` (alias `reset`) closes Chromium, Terminal, Files, and leftover jobs via wmctrl — **same box id**, no Docker restart.
 
 Wait is capped at 10s per step. `stop_on_error` defaults true; earlier steps stay in the receipt (`ok: false`, `stopped_at`).
 
@@ -67,6 +69,8 @@ SDKs: `client.recipe({ steps: [...] })`. EnsureBox demo proxy: `POST /api/v1/box
 | When to use | Annotated business app | Next click needs a new picture | Choreography already known |
 
 CUA cannot be a parallel DAG. Two clicks share one cursor. Recipes still win on **round trips** and **model turns** when the path does not need vision between steps.
+
+Optional `record: true` plus `artifact_dir` writes a cook video and PNG files so a UI can show them without stuffing megabytes of base64 through the receipt. L1’s **Record cook** switch (default on) uses that. `reset_desktop` is a real step for a clean empty desktop between runs.
 
 If the agent must look at the framebuffer after every click, keep single-op CUA (or `screenshot: "each"`, which is still one HTTP call but a large body).
 
