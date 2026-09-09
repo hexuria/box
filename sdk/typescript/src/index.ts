@@ -76,13 +76,23 @@ export type RecipeStep =
   | { op: "click"; x: number; y: number; button?: number }
   | { op: "double_click" | "double-click"; x: number; y: number; button?: number }
   | { op: "move"; x: number; y: number }
+  | { op: "press"; x: number; y: number; button?: number }
+  | {
+      op: "release";
+      x?: number;
+      y?: number;
+      button?: number;
+      path?: { x: number; y: number }[];
+    }
   | { op: "drag"; x1: number; y1: number; x2: number; y2: number; button?: number }
   | { op: "type"; text: string }
-  | { op: "key"; key: string }
+  | { op: "key"; key: string; action?: "tap" | "down" | "up" }
   | { op: "scroll"; x: number; y: number; dx: number; dy: number }
   | { op: "wait"; ms: number }
   | { op: "screenshot" }
   | { op: "reset_desktop" | "reset" };
+
+export type RecipeSettle = "off" | "compressed" | "raw";
 
 export type RecipeRequest = {
   name?: string;
@@ -90,6 +100,7 @@ export type RecipeRequest = {
   screenshot?: RecipeScreenshot;
   record?: boolean;
   artifact_dir?: string;
+  settle?: RecipeSettle;
   steps: RecipeStep[];
 };
 
@@ -192,6 +203,13 @@ export class GrokBox {
     return this.authJson("POST", `${this.execUrl}/v1/files/mkdir`, { path, parents });
   }
 
+  async filesRename(
+    from: string,
+    to: string,
+  ): Promise<{ from: string; to: string }> {
+    return this.authJson("POST", `${this.execUrl}/v1/files/rename`, { from, to });
+  }
+
   async screenshot(): Promise<ScreenshotResponse> {
     return this.authJson("POST", `${this.execUrl}/v1/cua/screenshot`, undefined, 60_000);
   }
@@ -230,12 +248,38 @@ export class GrokBox {
     return this.authJson("POST", `${this.execUrl}/v1/cua/drag`, { x1, y1, x2, y2, button });
   }
 
+  async press(x: number, y: number, button?: number): Promise<CuaOk> {
+    return this.authJson("POST", `${this.execUrl}/v1/cua/press`, { x, y, button });
+  }
+
+  async mouseDown(x: number, y: number, button?: number): Promise<CuaOk> {
+    return this.authJson("POST", `${this.execUrl}/v1/cua/mousedown`, { x, y, button });
+  }
+
+  async release(
+    x?: number,
+    y?: number,
+    button?: number,
+    path?: { x: number; y: number }[],
+  ): Promise<CuaOk> {
+    return this.authJson("POST", `${this.execUrl}/v1/cua/release`, { x, y, button, path });
+  }
+
+  async mouseUp(
+    x?: number,
+    y?: number,
+    button?: number,
+    path?: { x: number; y: number }[],
+  ): Promise<CuaOk> {
+    return this.authJson("POST", `${this.execUrl}/v1/cua/mouseup`, { x, y, button, path });
+  }
+
   async type(text: string): Promise<CuaOk> {
     return this.authJson("POST", `${this.execUrl}/v1/cua/type`, { text });
   }
 
-  async key(key: string): Promise<CuaOk> {
-    return this.authJson("POST", `${this.execUrl}/v1/cua/key`, { key });
+  async key(key: string, action?: "tap" | "down" | "up"): Promise<CuaOk> {
+    return this.authJson("POST", `${this.execUrl}/v1/cua/key`, { key, action });
   }
 
   async scroll(x: number, y: number, dx: number, dy: number): Promise<CuaOk> {
