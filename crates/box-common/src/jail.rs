@@ -1,5 +1,8 @@
+use std::ffi::OsString;
 use std::io;
 use std::path::{Component, Path, PathBuf};
+
+use smallvec::SmallVec;
 
 const MAX_PATH_BYTES: usize = 4096;
 
@@ -34,8 +37,29 @@ pub fn resolve_in_jail(root: &Path, user_path: &str) -> Result<PathBuf, JailErro
     }
 
     let root = canonicalize_root(root)?;
+    resolve_against_canonical_root(&root, user_path)
+}
+
+/// Like [`resolve_in_jail`], but `root` must already exist and be canonical.
+///
+/// Callers that cache `workspace.canonicalize()` (box-exec) skip a
+/// `create_dir_all` + `canonicalize` on every request.
+pub fn resolve_in_canonical_jail(root: &Path, user_path: &str) -> Result<PathBuf, JailError> {
+    if user_path.contains('\0') {
+        return Err(JailError::Invalid);
+    }
+    if user_path.len() > MAX_PATH_BYTES {
+        return Err(JailError::TooLong);
+    }
+    if root.as_os_str().is_empty() {
+        return Err(JailError::Empty);
+    }
+    resolve_against_canonical_root(root, user_path)
+}
+
+fn resolve_against_canonical_root(root: &Path, user_path: &str) -> Result<PathBuf, JailError> {
     if user_path.is_empty() {
-        return Ok(root);
+        return Ok(root.to_path_buf());
     }
 
     let raw = Path::new(user_path);
@@ -59,7 +83,7 @@ pub fn resolve_in_jail(root: &Path, user_path: &str) -> Result<PathBuf, JailErro
     }
 
     let mut ancestor = lexical.clone();
-    let mut missing = Vec::new();
+    let mut missing = SmallVec::<[OsString; 8]>::new();
     while !ancestor.exists() {
         let name = ancestor
             .file_name()
@@ -133,11 +157,17 @@ mod tests {
     }
 
     #[test]
-    fn relative_ok() {
+    fn canonical_jail_matches_resolve_in_jail() {
         let tmp = tmp_root();
         fs::write(tmp.path().join("ok.txt"), b"hi").unwrap();
-        let resolved = resolve_in_jail(tmp.path(), "ok.txt").unwrap();
-        assert_eq!(resolved, tmp.path().canonicalize().unwrap().join("ok.txt"));
+        let root = tmp.path().canonicalize().unwrap();
+        let a = resolve_in_jail(tmp.path(), "ok.txt").unwrap();
+        let b = resolve_in_canonical_jail(&root, "ok.txt").unwrap();
+        assert_eq!(a, b);
+        assert!(matches!(
+            resolve_in_canonical_jail(&root, "../etc/passwd"),
+            Err(JailError::Escape)
+        ));
     }
 
     #[test]
