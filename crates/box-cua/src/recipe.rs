@@ -16,15 +16,27 @@ use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
 use crate::cook_record::{recording_mime, start_cook_recorder, stop_cook_recorder, CookRecorder};
+use crate::settle::{
+    close_chromium_windows, dock_click, page_snap, wait_chromium_usable, wait_page_change,
+};
 use crate::{
-    click, double_click, drag, key, move_pointer, screenshot_from_png, screenshot_png, scroll,
-    type_text, ClickRequest, CuaConfig, CuaError, DragRequest, KeyRequest, MoveRequest,
-    ScreenshotResponse, ScrollRequest, TypeRequest,
+    click, double_click, drag, key_inner, move_pointer, press, release_step, screenshot_from_png,
+    screenshot_png, scroll, type_text_inner, ClickRequest, CuaConfig, CuaError, CuaPoint,
+    DragRequest, KeyAction, MoveRequest, ScreenshotResponse, ScrollRequest,
 };
 
-pub const MAX_RECIPE_STEPS: usize = 64;
+pub const MAX_RECIPE_STEPS: usize = 256;
 pub const MAX_WAIT_MS: u64 = 10_000;
 const RESET_DESKTOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+const TYPE_CHAR_MS: u64 = 30;
+const KEY_PACE_MS: u64 = 25;
+const OMNIBOX_SETTLE_MS: u64 = 220;
+const RAW_APP_WAIT_MS: u64 = 6_000;
+const RAW_PAGE_WAIT_MS: u64 = 5_000;
+const COMPRESSED_APP_WAIT_MS: u64 = 4_000;
+const COMPRESSED_PAGE_WAIT_MS: u64 = 3_000;
+/// Let tint2 finish a dock toggle (hide) before we map Chromium again.
+const DOCK_TOGGLE_MS: u64 = 180;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -33,6 +45,18 @@ pub enum RecipeScreenshot {
     #[default]
     End,
     Each,
+}
+
+/// How long cook should wait for Chromium / page paint. `raw` is v1 (teach
+/// waits stay in the plan; these are extra condition waits). `compressed`
+/// is v2/v3 — shorter timeouts so the comparison stays faster.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecipeSettle {
+    Off,
+    #[default]
+    Compressed,
+    Raw,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -55,6 +79,24 @@ pub enum RecipeStep {
         x: i32,
         y: i32,
     },
+    #[serde(alias = "mousedown")]
+    Press {
+        x: i32,
+        y: i32,
+        #[serde(default)]
+        button: Option<u8>,
+    },
+    #[serde(alias = "mouseup")]
+    Release {
+        #[serde(default)]
+        x: Option<i32>,
+        #[serde(default)]
+        y: Option<i32>,
+        #[serde(default)]
+        button: Option<u8>,
+        #[serde(default)]
+        path: Option<Vec<CuaPoint>>,
+    },
     Drag {
         x1: i32,
         y1: i32,
@@ -68,6 +110,8 @@ pub enum RecipeStep {
     },
     Key {
         key: String,
+        #[serde(default)]
+        action: Option<KeyAction>,
     },
     Scroll {
         x: i32,
@@ -90,6 +134,8 @@ impl RecipeStep {
             Self::Click { .. } => "click",
             Self::DoubleClick { .. } => "double_click",
             Self::Move { .. } => "move",
+            Self::Press { .. } => "press",
+            Self::Release { .. } => "release",
             Self::Drag { .. } => "drag",
             Self::Type { .. } => "type",
             Self::Key { .. } => "key",
@@ -111,13 +157,18 @@ pub struct RecipeRequest {
     pub stop_on_error: Option<bool>,
     #[serde(default)]
     pub screenshot: Option<RecipeScreenshot>,
-    /// Capture the framebuffer with ffmpeg/x11grab from step 0 until the cook ends.
+    /// Capture the framebuffer with ffmpeg/x11grab before the first CUA step
+    /// and SIGINT-stop after the last.
     #[serde(default)]
     pub record: Option<bool>,
     /// Workspace-relative or `/workspace/...` dir for PNG/video files. When set,
     /// screenshot JSON omits `png_base64` (path only) so L1 can show artifacts.
     #[serde(default)]
     pub artifact_dir: Option<String>,
+    /// Smart waits for a mapped Chromium window and a title/URL change.
+    /// L1 sends `raw` for v1 and `compressed` for v2/v3.
+    #[serde(default)]
+    pub settle: Option<RecipeSettle>,
     pub steps: Vec<RecipeStep>,
 }
 
@@ -129,6 +180,7 @@ impl Default for RecipeRequest {
             screenshot: None,
             record: None,
             artifact_dir: None,
+            settle: None,
             steps: Vec::new(),
         }
     }
@@ -146,12 +198,16 @@ impl RecipeRequest {
     pub fn record(&self) -> bool {
         self.record.unwrap_or(false)
     }
+
+    pub fn settle_mode(&self) -> RecipeSettle {
+        self.settle.unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RecipeStepResult {
     pub index: usize,
-    pub op: String,
+    pub op: &'static str,
     pub ok: bool,
     pub ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -362,6 +418,42 @@ pub fn validate_recipe(config: &CuaConfig, req: &RecipeRequest) -> Result<(), Cu
                 }
             }
             RecipeStep::Move { x, y } => crate::validate_point(config, *x, *y)?,
+            RecipeStep::Press { x, y, button } => {
+                crate::validate_point(config, *x, *y)?;
+                if let Some(button) = *button {
+                    if !(1..=7).contains(&button) {
+                        return Err(CuaError::Invalid("button must be 1-7".into()));
+                    }
+                }
+            }
+            RecipeStep::Release { x, y, button, path } => {
+                match (x, y) {
+                    (Some(x), Some(y)) => crate::validate_point(config, *x, *y)?,
+                    (None, None) => {}
+                    _ => {
+                        return Err(CuaError::Invalid(
+                            "x and y must both be set or both omitted".into(),
+                        ));
+                    }
+                }
+                if let Some(button) = *button {
+                    if !(1..=7).contains(&button) {
+                        return Err(CuaError::Invalid("button must be 1-7".into()));
+                    }
+                }
+                if let Some(path) = path {
+                    if path.len() > crate::MAX_MOTION_PATH {
+                        return Err(CuaError::Invalid(format!(
+                            "release path has {} points; max is {}",
+                            path.len(),
+                            crate::MAX_MOTION_PATH
+                        )));
+                    }
+                    for point in path {
+                        crate::validate_point(config, point.x, point.y)?;
+                    }
+                }
+            }
             RecipeStep::Drag {
                 x1,
                 y1,
@@ -385,7 +477,7 @@ pub fn validate_recipe(config: &CuaConfig, req: &RecipeRequest) -> Result<(), Cu
                     return Err(CuaError::Invalid("text is too long".into()));
                 }
             }
-            RecipeStep::Key { key } => {
+            RecipeStep::Key { key, action: _ } => {
                 if key.is_empty() {
                     return Err(CuaError::Invalid("key must not be empty".into()));
                 }
@@ -436,6 +528,8 @@ pub async fn run_recipe(
         None
     };
 
+    // ffmpeg x11grab must be grabbing before the first CUA step (including
+    // warmup_pointer). Stop is SIGINT after the last step / end screenshot.
     let mut recorder: Option<CookRecorder> = None;
     let mut recording_error = None;
     if req.record() {
@@ -457,20 +551,45 @@ pub async fn run_recipe(
         }
     }
 
+    // Non-sync warp so step 0 is not the first XTEST motion on this display.
+    crate::warmup_pointer(config).await;
+
     let started = Instant::now();
     let stop_on_error = req.stop_on_error();
     let shot_mode = req.screenshot_mode();
+    let settle = req.settle_mode();
     let mut steps = Vec::with_capacity(req.steps.len());
     let mut artifacts = Vec::new();
     let mut ok = true;
     let mut stopped_at = None;
+    let mut ctrl_held = false;
+    let mut last_key: Option<String> = None;
 
     for (index, step) in req.steps.iter().enumerate() {
+        let before_page = match (settle, step) {
+            (RecipeSettle::Off, _) => None,
+            (_, RecipeStep::Key { key, .. }) if is_return_key(key) => Some(page_snap(config).await),
+            _ => None,
+        };
         let step_started = Instant::now();
         let result = run_step(config, step).await;
+        if result.is_ok() && settle != RecipeSettle::Off {
+            settle_after(
+                config,
+                step,
+                settle,
+                &mut ctrl_held,
+                &mut last_key,
+                before_page.as_ref(),
+            )
+            .await;
+        } else {
+            track_key_state(step, &mut ctrl_held, &mut last_key);
+        }
         let ms = step_started.elapsed().as_millis() as u64;
         match result {
             Ok(()) => {
+                tracing::info!(index, op = step.op_name(), ms, ok = true, "recipe step");
                 let want_shot = matches!(step, RecipeStep::Screenshot {})
                     || (shot_mode == RecipeScreenshot::Each
                         && !matches!(step, RecipeStep::Wait { .. }));
@@ -482,7 +601,7 @@ pub async fn run_recipe(
                             ok = false;
                             steps.push(RecipeStepResult {
                                 index,
-                                op: step.op_name().into(),
+                                op: step.op_name(),
                                 ok: false,
                                 ms,
                                 error: Some(err.to_string()),
@@ -508,7 +627,7 @@ pub async fn run_recipe(
                 }
                 steps.push(RecipeStepResult {
                     index,
-                    op: step.op_name().into(),
+                    op: step.op_name(),
                     ok: true,
                     ms,
                     error: None,
@@ -516,10 +635,18 @@ pub async fn run_recipe(
                 });
             }
             Err(err) => {
+                tracing::info!(
+                    index,
+                    op = step.op_name(),
+                    ms,
+                    ok = false,
+                    error = %err,
+                    "recipe step"
+                );
                 ok = false;
                 steps.push(RecipeStepResult {
                     index,
-                    op: step.op_name().into(),
+                    op: step.op_name(),
                     ok: false,
                     ms,
                     error: Some(err.to_string()),
@@ -530,6 +657,13 @@ pub async fn run_recipe(
                     break;
                 }
             }
+        }
+    }
+
+    if ok && settle == RecipeSettle::Raw {
+        if matches!(req.steps.last(), Some(RecipeStep::Click { .. })) {
+            close_chromium_windows(config).await;
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
         }
     }
 
@@ -546,7 +680,7 @@ pub async fn run_recipe(
                 ok = false;
                 steps.push(RecipeStepResult {
                     index: steps.len(),
-                    op: "screenshot".into(),
+                    op: "screenshot",
                     ok: false,
                     ms: 0,
                     error: Some(err.to_string()),
@@ -583,12 +717,20 @@ pub async fn run_recipe(
         }
     }
 
+    let duration_ms = started.elapsed().as_millis() as u64;
+    tracing::info!(
+        ok,
+        duration_ms,
+        ran = steps.iter().filter(|s| s.ok).count(),
+        "recipe done"
+    );
+
     Ok(RecipeResponse {
         ok,
         name: req.name.clone(),
         ran: steps.iter().filter(|s| s.ok).count(),
         stopped_at,
-        duration_ms: started.elapsed().as_millis() as u64,
+        duration_ms,
         steps,
         screenshot: final_shot,
         artifacts,
@@ -623,6 +765,20 @@ async fn run_step(config: &CuaConfig, step: &RecipeStep) -> Result<(), CuaError>
         RecipeStep::Move { x, y } => {
             move_pointer(config, &MoveRequest { x: *x, y: *y }).await?;
         }
+        RecipeStep::Press { x, y, button } => {
+            press(
+                config,
+                &ClickRequest {
+                    x: *x,
+                    y: *y,
+                    button: *button,
+                },
+            )
+            .await?;
+        }
+        RecipeStep::Release { x, y, button, path } => {
+            release_step(config, *x, *y, *button, path.as_deref()).await?;
+        }
         RecipeStep::Drag {
             x1,
             y1,
@@ -643,16 +799,19 @@ async fn run_step(config: &CuaConfig, step: &RecipeStep) -> Result<(), CuaError>
             .await?;
         }
         RecipeStep::Type { text } => {
-            type_text(config, &TypeRequest { text: text.clone() }).await?;
+            for ch in text.chars() {
+                let mut buf = [0u8; 4];
+                let piece = ch.encode_utf8(&mut buf);
+                type_text_inner(config, piece).await?;
+                tokio::time::sleep(std::time::Duration::from_millis(TYPE_CHAR_MS)).await;
+            }
         }
-        RecipeStep::Key { key: keysym } => {
-            key(
-                config,
-                &KeyRequest {
-                    key: keysym.clone(),
-                },
-            )
-            .await?;
+        RecipeStep::Key {
+            key: keysym,
+            action,
+        } => {
+            key_inner(config, keysym, action.unwrap_or_default()).await?;
+            tokio::time::sleep(std::time::Duration::from_millis(KEY_PACE_MS)).await;
         }
         RecipeStep::Scroll { x, y, dx, dy } => {
             scroll(
@@ -677,6 +836,90 @@ async fn run_step(config: &CuaConfig, step: &RecipeStep) -> Result<(), CuaError>
         }
     }
     Ok(())
+}
+
+fn is_return_key(key: &str) -> bool {
+    key.eq_ignore_ascii_case("Return") || key.eq_ignore_ascii_case("Enter")
+}
+
+fn is_ctrl_key(key: &str) -> bool {
+    key.eq_ignore_ascii_case("ctrl") || key.eq_ignore_ascii_case("control")
+}
+
+fn track_key_state(step: &RecipeStep, ctrl_held: &mut bool, last_key: &mut Option<String>) {
+    if let RecipeStep::Key { key, action } = step {
+        let act = action.unwrap_or_default();
+        if is_ctrl_key(key) {
+            match act {
+                KeyAction::Down => *ctrl_held = true,
+                KeyAction::Up => *ctrl_held = false,
+                KeyAction::Tap => {}
+            }
+        }
+        *last_key = Some(key.clone());
+    } else if !matches!(step, RecipeStep::Wait { .. }) {
+        *last_key = None;
+        if matches!(
+            step,
+            RecipeStep::Type { .. } | RecipeStep::Click { .. } | RecipeStep::ResetDesktop {}
+        ) {
+            *ctrl_held = false;
+        }
+    }
+}
+
+fn app_wait_ms(settle: RecipeSettle) -> u64 {
+    match settle {
+        RecipeSettle::Raw => RAW_APP_WAIT_MS,
+        RecipeSettle::Compressed => COMPRESSED_APP_WAIT_MS,
+        RecipeSettle::Off => 0,
+    }
+}
+
+fn page_wait_ms(settle: RecipeSettle) -> u64 {
+    match settle {
+        RecipeSettle::Raw => RAW_PAGE_WAIT_MS,
+        RecipeSettle::Compressed => COMPRESSED_PAGE_WAIT_MS,
+        RecipeSettle::Off => 0,
+    }
+}
+
+async fn settle_after(
+    config: &CuaConfig,
+    step: &RecipeStep,
+    settle: RecipeSettle,
+    ctrl_held: &mut bool,
+    last_key: &mut Option<String>,
+    before_page: Option<&crate::settle::PageSnap>,
+) {
+    match step {
+        RecipeStep::Click { y, .. } | RecipeStep::DoubleClick { y, .. } => {
+            if dock_click(*y, config.height) {
+                tokio::time::sleep(std::time::Duration::from_millis(DOCK_TOGGLE_MS)).await;
+                let _ = wait_chromium_usable(config, app_wait_ms(settle)).await;
+            }
+        }
+        RecipeStep::Key { key, action } => {
+            let act = action.unwrap_or_default();
+            if key.eq_ignore_ascii_case("ctrl+l")
+                || (key.eq_ignore_ascii_case("l") && *ctrl_held)
+                || (is_ctrl_key(key)
+                    && matches!(act, KeyAction::Up)
+                    && last_key
+                        .as_deref()
+                        .is_some_and(|k| k.eq_ignore_ascii_case("l")))
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(OMNIBOX_SETTLE_MS)).await;
+            }
+            if is_return_key(key) {
+                if let Some(before) = before_page {
+                    let _ = wait_page_change(config, before, page_wait_ms(settle)).await;
+                }
+            }
+        }
+        _ => {}
+    }
+    track_key_state(step, ctrl_held, last_key);
 }
 
 #[cfg(test)]
@@ -755,6 +998,32 @@ mod tests {
     }
 
     #[test]
+    fn parses_press_release_and_key_action() {
+        let press: RecipeStep =
+            serde_json::from_str(r#"{"op":"press","x":10,"y":20,"button":1}"#).unwrap();
+        assert!(matches!(press, RecipeStep::Press { x: 10, y: 20, .. }));
+        let release: RecipeStep =
+            serde_json::from_str(r#"{"op":"release","x":40,"y":50}"#).unwrap();
+        assert!(matches!(
+            release,
+            RecipeStep::Release {
+                x: Some(40),
+                y: Some(50),
+                ..
+            }
+        ));
+        let key_down: RecipeStep =
+            serde_json::from_str(r#"{"op":"key","key":"shift","action":"down"}"#).unwrap();
+        assert!(matches!(
+            key_down,
+            RecipeStep::Key {
+                action: Some(KeyAction::Down),
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn parses_reset_desktop_aliases() {
         let step: RecipeStep = serde_json::from_str(r#"{"op":"reset_desktop"}"#).unwrap();
         assert!(matches!(step, RecipeStep::ResetDesktop {}));
@@ -785,6 +1054,16 @@ mod tests {
     }
 
     #[test]
+    fn parses_settle_raw() {
+        let req: RecipeRequest =
+            serde_json::from_str(r#"{"settle":"raw","steps":[{"op":"wait","ms":1}]}"#).unwrap();
+        assert_eq!(req.settle_mode(), RecipeSettle::Raw);
+        let req: RecipeRequest =
+            serde_json::from_str(r#"{"steps":[{"op":"wait","ms":1}]}"#).unwrap();
+        assert_eq!(req.settle_mode(), RecipeSettle::Compressed);
+    }
+
+    #[test]
     fn accepts_known_path() {
         let req = RecipeRequest {
             name: Some("open-url".into()),
@@ -801,6 +1080,7 @@ mod tests {
                 },
                 RecipeStep::Key {
                     key: "Return".into(),
+                    action: None,
                 },
                 RecipeStep::Wait { ms: 50 },
             ],
