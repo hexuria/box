@@ -41,10 +41,19 @@ export type ReadyResponse = {
 };
 
 export type ExecResult = {
-  exit_code?: number;
+  exit_code?: number | null;
   stdout?: string;
   stderr?: string;
   timed_out?: boolean;
+  duration_ms?: number;
+  cwd?: string;
+  truncated?: boolean;
+};
+
+export type DirEntry = {
+  name: string;
+  kind: string;
+  size?: number | null;
 };
 
 export type FileResult = {
@@ -52,7 +61,13 @@ export type FileResult = {
   path?: string;
   content?: string;
   encoding?: string;
-  entries?: Array<{ name?: string; kind?: string; size?: number | null }>;
+  size?: number;
+  entries?: DirEntry[];
+  bytes_written?: number;
+  deleted?: boolean;
+  created?: boolean;
+  from?: string;
+  to?: string;
 };
 
 export type ScreenshotResult = {
@@ -73,6 +88,7 @@ export type RecipeRequest = {
   screenshot?: RecipeScreenshotMode;
   record?: boolean;
   artifact_dir?: string;
+  settle?: "off" | "compressed" | "raw";
   steps: unknown[];
 };
 
