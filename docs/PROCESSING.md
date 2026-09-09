@@ -77,14 +77,17 @@ Actuators talk to `DISPLAY=:1` (1280×800, origin top-left). Out-of-range coordi
 
 The caller already knows the choreography (click, type, key, …). One Bearer POST runs it. The pointer is shared, so steps are sequential. Invalid plans (`steps` empty, >64 steps, out-of-range coordinates) return **400** and do not move the mouse.
 
-Default `screenshot` is `end` (one PNG on the receipt). Use `none` if you will screenshot yourself. `each` is large.
+Default `screenshot` is `end` (one PNG on the receipt, and a file when `artifact_dir` is set). Use `none` if you will screenshot yourself. `each` is large. `record: true` writes `cook.mp4` via ffmpeg/x11grab from step 0. `reset_desktop` closes windows on this display.
 
 ```json
 {
   "name": "search",
   "stop_on_error": true,
   "screenshot": "end",
+  "record": true,
+  "artifact_dir": ".l1/cooks/demo",
   "steps": [
+    { "op": "reset_desktop" },
     { "op": "click", "x": 640, "y": 80 },
     { "op": "type", "text": "hello" },
     { "op": "key", "key": "Return" },

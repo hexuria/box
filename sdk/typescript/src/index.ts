@@ -63,8 +63,9 @@ export type ScreenshotResponse = {
   mime: string;
   width: number;
   height: number;
-  png_base64: string;
+  png_base64?: string;
   bytes: number;
+  path?: string;
 };
 
 export type CuaOk = { ok: boolean };
@@ -80,13 +81,27 @@ export type RecipeStep =
   | { op: "key"; key: string }
   | { op: "scroll"; x: number; y: number; dx: number; dy: number }
   | { op: "wait"; ms: number }
-  | { op: "screenshot" };
+  | { op: "screenshot" }
+  | { op: "reset_desktop" | "reset" };
 
 export type RecipeRequest = {
   name?: string;
   stop_on_error?: boolean;
   screenshot?: RecipeScreenshot;
+  record?: boolean;
+  artifact_dir?: string;
   steps: RecipeStep[];
+};
+
+export type RecipeArtifact = {
+  kind: string;
+  label: string;
+  path: string;
+  mime: string;
+  bytes: number;
+  width?: number;
+  height?: number;
+  step_index?: number;
 };
 
 export type RecipeStepResult = {
@@ -106,6 +121,8 @@ export type RecipeResponse = {
   duration_ms: number;
   steps: RecipeStepResult[];
   screenshot?: ScreenshotResponse;
+  artifacts?: RecipeArtifact[];
+  recording_error?: string;
 };
 
 export class GrokBox {

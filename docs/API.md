@@ -223,7 +223,10 @@ Many CUA steps in **one** request. The guest lints the plan (empty, too many ste
   "name": "search",
   "stop_on_error": true,
   "screenshot": "end",
+  "record": true,
+  "artifact_dir": ".l1/cooks/demo",
   "steps": [
+    { "op": "reset_desktop" },
     { "op": "click", "x": 640, "y": 80, "button": 1 },
     { "op": "type", "text": "hello" },
     { "op": "key", "key": "Return" },
@@ -232,7 +235,7 @@ Many CUA steps in **one** request. The guest lints the plan (empty, too many ste
 }
 ```
 
-`200` is a receipt (`ok`, `ran`, `stopped_at`, `duration_ms`, `steps[]`, optional `screenshot`). A step failure with `stop_on_error: true` is still **200** with `ok: false`. Max 64 steps. Wait max 10s per step.
+`200` is a receipt (`ok`, `ran`, `stopped_at`, `duration_ms`, `steps[]`, optional `screenshot`, `artifacts[]`). When `artifact_dir` is set, PNG/video are workspace files (`path` on the receipt) so a client can fetch them without inline base64. `record: true` captures x11grab from step 0. `reset_desktop` closes guest windows on this X session. A step failure with `stop_on_error: true` is still **200** with `ok: false`. Max 64 steps. Wait max 10s per step.
 
 ---
 
