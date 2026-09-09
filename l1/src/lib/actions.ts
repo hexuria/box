@@ -89,6 +89,24 @@ export async function startBoxAction(id: string) {
   revalidatePath(`/boxes/${id}`);
 }
 
+export async function destroyBoxAction(
+  id: string,
+): Promise<{ error: string } | null> {
+  try {
+    await requireL1Session();
+    const boxId = id.trim();
+    if (!boxId) {
+      return { error: "Workspace id is required." };
+    }
+    await ensurebox.destroyBox(boxId);
+    revalidatePath("/");
+    revalidatePath(`/boxes/${boxId}`);
+    redirect("/");
+  } catch (err) {
+    return fail(err);
+  }
+}
+
 export async function execAction(
   id: string,
   _prev: unknown,
