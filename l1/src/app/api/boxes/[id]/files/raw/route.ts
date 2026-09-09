@@ -4,6 +4,7 @@ import {
   cookArtifactMime,
   isCookArtifactPath,
 } from "@/lib/cook-artifacts";
+import { remuxMp4Faststart } from "@/lib/cook-remux";
 import { EnsureboxError, readFile } from "@/lib/ensurebox";
 import { workspaceRelative } from "@/lib/workspace-path";
 
@@ -73,8 +74,11 @@ export async function GET(request: Request, { params }: Params) {
         { status: 404 },
       );
     }
-    const bytes = Buffer.from(content, "base64");
+    let bytes: Buffer = Buffer.from(content, "base64");
     const mime = cookArtifactMime(rel);
+    if (mime === "video/mp4") {
+      bytes = Buffer.from(await remuxMp4Faststart(bytes));
+    }
     const leaf = rel.split("/").filter(Boolean).pop() || "artifact";
     return new NextResponse(new Uint8Array(bytes), {
       status: 200,
