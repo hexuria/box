@@ -1,5 +1,8 @@
 # syntax=docker/dockerfile:1
 # grok-box: box-exec + box-host + Xvfb desktop + Chromium + CUA tools.
+#
+# box-exec / box-host default features compile in mimalloc (needs gcc, already
+# in rust:bookworm). Opt out with cargo --no-default-features.
 
 FROM rust:1.85-bookworm AS builder
 WORKDIR /src
@@ -42,10 +45,11 @@ RUN apt-get update \
 COPY --from=builder /src/target/release/box-exec /usr/local/bin/box-exec
 COPY --from=builder /src/target/release/box-host /usr/local/bin/box-host
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY docker/websockify-nodelay.py /usr/local/bin/websockify-nodelay
 COPY docker/box-reset-desktop.sh /usr/local/bin/box-reset-desktop
 COPY docker/chromium-policies.json /etc/chromium/policies/managed/grok-box.json
 COPY docker/chromium-policies.json /etc/opt/chrome/policies/managed/grok-box.json
-RUN chmod 755 /usr/local/bin/entrypoint.sh /usr/local/bin/box-exec /usr/local/bin/box-host \
+RUN chmod 755 /usr/local/bin/entrypoint.sh /usr/local/bin/websockify-nodelay /usr/local/bin/box-exec /usr/local/bin/box-host \
         /usr/local/bin/box-reset-desktop
 
 ENV WORKSPACE_ROOT=/workspace \

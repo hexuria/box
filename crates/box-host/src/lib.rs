@@ -2,7 +2,8 @@
 //!
 //! This process does **not** run inference. It advertises box identity,
 //! capabilities (exec, files, desktop, chrome, cua), and readiness of
-//! `box-exec` (and the X display when desktop is required).
+//! `box-exec` (and the X display when desktop is required). Heap: same
+//! mimalloc feature as `box-exec`.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -15,7 +16,7 @@ use axum::{Json, Router};
 use box_chrome::{probe_chrome, ChromeConfig, ChromeStatus};
 use box_common::{
     bearer_token, container_local_host, container_local_http_url, cors_layer, tokens_equal,
-    ApiError, BoxConfig, PROTOCOL_VERSION,
+    ApiError, BoxConfig, GLOBAL_ALLOCATOR, PROTOCOL_VERSION,
 };
 use box_cua::CuaConfig;
 use box_desktop::{DesktopConfig, DesktopStatus};
@@ -124,7 +125,12 @@ pub fn router(state: AppState) -> Router {
 pub async fn serve(config: BoxConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let bind = config.host_bind;
     let app = router(AppState::from_config(&config));
-    tracing::info!(%bind, box_id = %config.box_id, "box-host listening");
+    tracing::info!(
+        %bind,
+        box_id = %config.box_id,
+        allocator = GLOBAL_ALLOCATOR,
+        "box-host listening"
+    );
     let listener = TcpListener::bind(bind).await?;
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())

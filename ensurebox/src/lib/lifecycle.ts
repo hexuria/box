@@ -4,6 +4,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { connectBox, waitUntilReady } from "./box-client";
 import type { RecipeRequest } from "grok-box";
 import { BIND_HOST, DATA_DIR, GROK_BOX_IMAGE, READY_TIMEOUT_MS } from "./config";
+import { loopbackConnectHost } from "./vnc-path";
 import { containerInspect, docker, imageExists } from "./docker";
 import { allocatePorts } from "./ports";
 import { getBox, listBoxes, removeBox, upsertBox } from "./store";
@@ -368,4 +369,34 @@ export async function scroll(
 export async function runRecipe(id: string, body: RecipeRequest): Promise<unknown> {
   const box = await requireBox(id);
   return connectBox(box).recipe(body);
+}
+
+export type VncUpstream = {
+  url: string;
+  password: string;
+  status: BoxRecord["status"];
+};
+
+/** Guest viewer bind for the authenticated RFB proxy. Never returned to L1. */
+export async function boxVncUpstream(id: string): Promise<VncUpstream> {
+  const box = await requireBox(id);
+  if (box.status !== "ready") {
+    const message =
+      box.status === "creating"
+        ? "workspace is still starting"
+        : "workspace is not ready";
+    throw new Error(message);
+  }
+  if (!box.ports.novnc) {
+    throw new Error("desktop viewer port is not allocated");
+  }
+  if (!box.vncPassword) {
+    throw new Error("desktop secret is missing; destroy and recreate this guest");
+  }
+  const host = loopbackConnectHost(BIND_HOST);
+  return {
+    url: `ws://${host}:${box.ports.novnc}/`,
+    password: box.vncPassword,
+    status: box.status,
+  };
 }

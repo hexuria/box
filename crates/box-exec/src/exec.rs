@@ -1,10 +1,9 @@
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::extract::State;
 use axum::Json;
-use box_common::{resolve_in_jail, ApiError};
+use box_common::{resolve_in_canonical_jail, ApiError};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
@@ -12,6 +11,15 @@ use tokio::process::Command;
 use crate::AppState;
 
 const STRIP_ENV: &[&str] = &["BOX_TOKEN", "BOX_HOST_TOKEN", "BOX_VNC_PASSWORD"];
+
+/// Sensible tty-ish defaults so `clear`, `tput`, and color-aware tools work
+/// even though exec is a pipe, not a PTY. Callers can override via `env`.
+const DEFAULT_CHILD_ENV: &[(&str, &str)] = &[
+    ("TERM", "xterm-256color"),
+    ("COLORTERM", "truecolor"),
+    ("COLUMNS", "120"),
+    ("LINES", "32"),
+];
 
 #[derive(Debug, Deserialize)]
 pub struct ExecRequest {
@@ -47,10 +55,11 @@ pub async fn handle(
 ) -> Result<Json<ExecResponse>, ApiError> {
     let argv = match req.command {
         CommandSpec::Argv(parts) => {
-            if parts.is_empty() || parts.iter().any(|p| p.is_empty() && parts.len() == 1) {
+            if parts.is_empty() {
                 return Err(ApiError::invalid_request("command argv must not be empty"));
             }
-            if parts[0].is_empty() {
+            // SAFETY: `parts` is non-empty.
+            if unsafe { parts.get_unchecked(0) }.is_empty() {
                 return Err(ApiError::invalid_request("command[0] must not be empty"));
             }
             parts
@@ -64,7 +73,7 @@ pub async fn handle(
     };
 
     let cwd_input = req.cwd.as_deref().unwrap_or("");
-    let cwd = resolve_in_jail(&state.workspace, cwd_input)?;
+    let cwd = resolve_in_canonical_jail(&state.workspace, cwd_input)?;
     if !cwd.is_dir() {
         return Err(ApiError::invalid_request(format!(
             "cwd is not a directory: {}",
@@ -124,16 +133,8 @@ pub async fn handle(
         .ok_or_else(|| ApiError::internal("missing stderr pipe"))?;
 
     let max = state.max_output_bytes;
-    let stdout_buf = Arc::new(Mutex::new(Capped::default()));
-    let stderr_buf = Arc::new(Mutex::new(Capped::default()));
-    let stdout_task = {
-        let dest = stdout_buf.clone();
-        tokio::spawn(async move { fill_capped(stdout, dest, max).await })
-    };
-    let stderr_task = {
-        let dest = stderr_buf.clone();
-        tokio::spawn(async move { fill_capped(stderr, dest, max).await })
-    };
+    let stdout_task = tokio::spawn(fill_capped(stdout, max));
+    let stderr_task = tokio::spawn(fill_capped(stderr, max));
 
     let wait_result = tokio::time::timeout(timeout, child.wait()).await;
     let duration_ms = started.elapsed().as_millis() as u64;
@@ -154,18 +155,18 @@ pub async fn handle(
     };
 
     let drain = async {
-        let _ = stdout_task.await;
-        let _ = stderr_task.await;
+        let stdout = stdout_task.await.unwrap_or_else(|_| Capped::default());
+        let stderr = stderr_task.await.unwrap_or_else(|_| Capped::default());
+        (stdout, stderr)
     };
-    let _ = tokio::time::timeout(Duration::from_secs(2), drain).await;
-
-    let stdout = stdout_buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    let stderr = stderr_buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let (stdout, stderr) = tokio::time::timeout(Duration::from_secs(2), drain)
+        .await
+        .unwrap_or_default();
 
     Ok(Json(ExecResponse {
         truncated: stdout.truncated || stderr.truncated,
-        stdout: String::from_utf8_lossy(&stdout.bytes).into_owned(),
-        stderr: String::from_utf8_lossy(&stderr.bytes).into_owned(),
+        stdout: bytes_to_string(stdout.bytes),
+        stderr: bytes_to_string(stderr.bytes),
         exit_code,
         timed_out,
         duration_ms,
@@ -179,6 +180,14 @@ fn apply_child_env(
 ) -> Result<(), ApiError> {
     for key in STRIP_ENV {
         cmd.env_remove(key);
+    }
+    for (key, value) in DEFAULT_CHILD_ENV {
+        let overridden = extra
+            .map(|env| env.keys().any(|k| k.eq_ignore_ascii_case(key)))
+            .unwrap_or(false);
+        if !overridden {
+            cmd.env(*key, *value);
+        }
     }
     if let Some(env) = extra {
         for (key, value) in env {
@@ -205,19 +214,20 @@ fn is_secret_key(key: &str) -> bool {
         .any(|secret| secret.eq_ignore_ascii_case(key))
 }
 
-#[derive(Clone, Default)]
+#[derive(Default)]
 struct Capped {
     bytes: Vec<u8>,
     truncated: bool,
 }
 
-async fn fill_capped<R: AsyncReadExt + Unpin>(mut reader: R, dest: Arc<Mutex<Capped>>, max: usize) {
+async fn fill_capped<R: AsyncReadExt + Unpin>(mut reader: R, max: usize) -> Capped {
+    let mut cap = Capped::default();
+    cap.bytes.reserve(8192.min(max));
     let mut buf = [0u8; 8192];
     loop {
         match reader.read(&mut buf).await {
             Ok(0) => break,
             Ok(n) => {
-                let mut cap = dest.lock().unwrap_or_else(|e| e.into_inner());
                 if cap.bytes.len() >= max {
                     cap.truncated = true;
                     continue;
@@ -232,6 +242,12 @@ async fn fill_capped<R: AsyncReadExt + Unpin>(mut reader: R, dest: Arc<Mutex<Cap
             Err(_) => break,
         }
     }
+    cap
+}
+
+fn bytes_to_string(bytes: Vec<u8>) -> String {
+    String::from_utf8(bytes)
+        .unwrap_or_else(|err| String::from_utf8_lossy(err.as_bytes()).into_owned())
 }
 
 fn clamp_timeout(state: &AppState, requested: Option<u64>) -> Duration {
@@ -251,6 +267,10 @@ fn kill_process_group(child: &mut tokio::process::Child) {
     #[cfg(unix)]
     if let Some(pid) = child.id() {
         let pgid = pid as i32;
+        // Safety: `cmd.process_group(0)` put this child in its own group,
+        // so `-pgid` signals only that group (not box-exec). `pid` came from
+        // `Child::id` for this spawn and is still the live group leader until
+        // wait reaps it.
         unsafe {
             libc::kill(-pgid, libc::SIGKILL);
         }
@@ -265,7 +285,7 @@ mod tests {
     #[test]
     fn clamp_respects_max() {
         let state = AppState {
-            workspace: std::path::PathBuf::from("/tmp"),
+            workspace: std::path::PathBuf::from("/tmp").canonicalize().unwrap(),
             token: "t".into(),
             max_file_bytes: 1,
             default_timeout: Duration::from_secs(30),
@@ -287,5 +307,6 @@ mod tests {
         assert!(is_secret_key("BOX_HOST_TOKEN"));
         assert!(is_secret_key("BOX_VNC_PASSWORD"));
         assert!(!is_secret_key("PATH"));
+        assert!(!is_secret_key("TERM"));
     }
 }

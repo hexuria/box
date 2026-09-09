@@ -1,445 +1,373 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { ActionLog } from "@/components/action-log";
+import { ComputerUseFrame } from "@/components/computer-use-frame";
 import {
-  clickAction,
-  doubleClickAction,
-  dragAction,
-  keyAction,
-  screenshotAction,
-  scrollAction,
-  typeAction,
-} from "@/lib/actions";
+  VncSurface,
+  type VncGuestPointer,
+  type VncGuestWheel,
+  type VncPhase,
+} from "@/components/vnc-surface";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import { TYPE_IDLE_MS, createTypeCoalescer } from "@/lib/action-log";
 import { FRAMEBUFFER } from "@/lib/config";
-import { browserEventToCua } from "@/lib/cua-keys";
+import { browserEventToCua, browserModifierToCua } from "@/lib/cua-keys";
+import { isPointerDrag } from "@/lib/cua-pointer";
+import { compressRecipeSteps, foldOmniboxChords } from "@/lib/recipe-compress";
 import {
   appendRecordedStep,
   planFromRecording,
   type RecipeStepJson,
 } from "@/lib/recipe-plan";
 
-type Shot = { png: string; width: number; height: number };
+export type TeachRecordingSend = {
+  planJson: string;
+  v1: RecipeStepJson[];
+  v2: RecipeStepJson[];
+};
 
-function pointFromEvent(
-  event: { clientX: number; clientY: number; currentTarget: EventTarget },
-  shot: Shot,
-): { x: number; y: number } {
-  const el = event.currentTarget as HTMLElement;
-  const rect = el.getBoundingClientRect();
-  const x = Math.round(((event.clientX - rect.left) / rect.width) * shot.width);
-  const y = Math.round(((event.clientY - rect.top) / rect.height) * shot.height);
-  return {
-    x: Math.min(Math.max(x, 0), shot.width - 1),
-    y: Math.min(Math.max(y, 0), shot.height - 1),
-  };
-}
+export type DesktopShot = { png: string; width: number; height: number };
 
 export function DesktopViewer({
   id,
   disabled,
   active = true,
+  maximized,
+  onMaximizedChange,
   onSendToRecipe,
 }: {
   id: string;
+  workspaceName?: string;
   disabled: boolean;
   active?: boolean;
-  onSendToRecipe: (planJson: string) => void;
+  maximized: boolean;
+  onMaximizedChange: (value: boolean) => void;
+  seedShot?: DesktopShot | null;
+  onSendToRecipe: (payload: TeachRecordingSend) => void;
 }) {
-  const [shot, setShot] = useState<Shot | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [live, setLive] = useState(true);
-  const [maximized, setMaximized] = useState(false);
-  const [recording, setRecording] = useState(false);
+  const [phase, setPhase] = useState<VncPhase>("idle");
+  const [session, setSession] = useState(0);
+  const [teaching, setTeaching] = useState(false);
+  const [logOpen, setLogOpen] = useState(false);
   const [steps, setSteps] = useState<RecipeStepJson[]>([]);
-  const [status, setStatus] = useState("Click Follow or Maximize, then use the mouse and keyboard on the picture.");
+  const [status, setStatus] = useState("");
   const lastActionAt = useRef(0);
   const dragOrigin = useRef<{ x: number; y: number } | null>(null);
   const dragging = useRef(false);
+  const heldButton = useRef<number | null>(null);
+  const lastClick = useRef<{ x: number; y: number; at: number } | null>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
-  const busyRef = useRef(false);
-  const recordingRef = useRef(false);
   const stepsRef = useRef<RecipeStepJson[]>([]);
-  const typeBuf = useRef("");
-  const keyBuf = useRef<string[]>([]);
+  const teachingFrom = useRef(0);
+  const coalescer = useRef(createTypeCoalescer());
+  const idleTimer = useRef<number>(0);
+  const recordActions = teaching || logOpen;
 
-  busyRef.current = busy;
-  recordingRef.current = recording;
   stepsRef.current = steps;
 
-  const record = useCallback((step: RecipeStepJson) => {
-    if (!recordingRef.current) {
+  const commitLog = useCallback((flushed: RecipeStepJson[]) => {
+    if (flushed.length === 0) {
       return;
     }
-    const now = Date.now();
-    const gap = lastActionAt.current ? now - lastActionAt.current : 0;
-    lastActionAt.current = now;
     setSteps((prev) => {
-      const next = appendRecordedStep(prev, step, gap);
+      let next = prev;
+      let last = lastActionAt.current;
+      const now = Date.now();
+      for (const step of flushed) {
+        const gap = last ? now - last : 0;
+        next = appendRecordedStep(next, step, gap);
+        last = now;
+      }
+      lastActionAt.current = last;
       stepsRef.current = next;
       return next;
     });
   }, []);
 
-  const refresh = useCallback(async () => {
-    const next = await screenshotAction(id);
-    if (next.error) {
-      setError(next.error);
-      return false;
+  const cancelIdleFlush = useCallback(() => {
+    if (idleTimer.current) {
+      window.clearTimeout(idleTimer.current);
+      idleTimer.current = 0;
     }
-    if (next.png) {
-      setShot({
-        png: next.png,
-        width: next.width ?? FRAMEBUFFER.width,
-        height: next.height ?? FRAMEBUFFER.height,
-      });
-      setError(null);
-    }
-    return true;
-  }, [id]);
+  }, []);
 
-  const run = useCallback(
-    async (label: string, task: () => Promise<{ error?: string }>, step?: RecipeStepJson) => {
-      if (disabled || busyRef.current) {
-        return;
-      }
-      busyRef.current = true;
-      setBusy(true);
-      setError(null);
-      setStatus(label);
-      try {
-        const result = await task();
-        if (result.error) {
-          setError(result.error);
-          return;
-        }
-        if (step) {
-          record(step);
-        }
-        await refresh();
-      } finally {
-        busyRef.current = false;
-        setBusy(false);
-      }
-      const pending = typeBuf.current;
-      if (pending) {
-        typeBuf.current = "";
-        await run(`type ${pending}`, () => typeAction(id, pending), {
-          op: "type",
-          text: pending,
-        });
-        return;
-      }
-      const nextKey = keyBuf.current.shift();
-      if (nextKey) {
-        await run(`key ${nextKey}`, () => keyAction(id, nextKey), {
-          op: "key",
-          key: nextKey,
-        });
-      }
-    },
-    [disabled, id, record, refresh],
-  );
+  const scheduleIdleFlush = useCallback(() => {
+    cancelIdleFlush();
+    idleTimer.current = window.setTimeout(() => {
+      commitLog(coalescer.current.idleFlush(Date.now()));
+    }, TYPE_IDLE_MS);
+  }, [cancelIdleFlush, commitLog]);
+
+  useEffect(() => () => cancelIdleFlush(), [cancelIdleFlush]);
 
   useEffect(() => {
-    if (disabled || !active) {
+    if (!active && maximized) {
+      onMaximizedChange(false);
+    }
+  }, [active, maximized, onMaximizedChange]);
+
+  const enterTakeover = useCallback(() => {
+    if (disabled) {
       return;
     }
-    void refresh();
-  }, [active, disabled, refresh]);
+    onMaximizedChange(true);
+    setStatus("Yellow or red exits the expanded view. Esc is sent to the guest.");
+  }, [disabled, onMaximizedChange]);
 
-  useEffect(() => {
-    if (disabled || !live || !active) {
+  const exitTakeover = useCallback(() => {
+    cancelIdleFlush();
+    commitLog(coalescer.current.flush(Date.now()));
+    onMaximizedChange(false);
+    setStatus("");
+  }, [cancelIdleFlush, commitLog, onMaximizedChange]);
+
+  function recordPointerStep(step: RecipeStepJson) {
+    if (!recordActions) {
       return;
     }
-    const timer = window.setInterval(() => {
-      if (busyRef.current || document.visibilityState !== "visible") {
-        return;
-      }
-      void refresh();
-    }, 1200);
-    return () => window.clearInterval(timer);
-  }, [active, disabled, live, refresh]);
-
-  useEffect(() => {
-    if (!active) {
-      setMaximized(false);
-    }
-  }, [active]);
-
-  useEffect(() => {
-    if (!maximized) {
-      return;
-    }
-    surfaceRef.current?.focus();
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        setMaximized(false);
-        return;
-      }
-      const mapped = browserEventToCua(event);
-      if (!mapped) {
-        return;
-      }
-      event.preventDefault();
-      if (mapped.kind === "type") {
-        typeBuf.current += mapped.text;
-        if (!busyRef.current) {
-          const text = typeBuf.current;
-          typeBuf.current = "";
-          void run(`type ${text}`, () => typeAction(id, text), {
-            op: "type",
-            text,
-          });
-        }
-        return;
-      }
-      if (busyRef.current || typeBuf.current) {
-        keyBuf.current.push(mapped.key);
-        if (!busyRef.current && typeBuf.current) {
-          const text = typeBuf.current;
-          typeBuf.current = "";
-          void run(`type ${text}`, () => typeAction(id, text), {
-            op: "type",
-            text,
-          });
-        }
-        return;
-      }
-      void run(`key ${mapped.key}`, () => keyAction(id, mapped.key), {
-        op: "key",
-        key: mapped.key,
-      });
-    };
-    window.addEventListener("keydown", onKey, { capture: true });
-    return () => window.removeEventListener("keydown", onKey, { capture: true });
-  }, [id, maximized, run]);
-
-  function onPointerDown(event: React.PointerEvent<HTMLImageElement>) {
-    if (!shot || disabled) {
-      return;
-    }
-    const point = pointFromEvent(event, shot);
-    dragOrigin.current = point;
-    dragging.current = false;
+    cancelIdleFlush();
+    commitLog(coalescer.current.flush(Date.now()));
+    commitLog([step]);
   }
 
-  function onPointerMove(event: React.PointerEvent<HTMLImageElement>) {
-    if (!shot || !dragOrigin.current) {
+  function onGuestPointer(event: VncGuestPointer) {
+    if (disabled || !recordActions) {
       return;
     }
-    const point = pointFromEvent(event, shot);
-    const dx = point.x - dragOrigin.current.x;
-    const dy = point.y - dragOrigin.current.y;
-    if (dx * dx + dy * dy > 64) {
-      dragging.current = true;
+    if (event.type === "down") {
+      dragOrigin.current = { x: event.x, y: event.y };
+      dragging.current = false;
+      heldButton.current = event.button;
+      return;
     }
-  }
-
-  function onPointerUp(event: React.PointerEvent<HTMLImageElement>) {
-    if (!shot || !dragOrigin.current) {
+    if (event.type === "move") {
+      if (!dragOrigin.current || heldButton.current == null) {
+        return;
+      }
+      if (isPointerDrag(dragOrigin.current, { x: event.x, y: event.y })) {
+        dragging.current = true;
+      }
+      return;
+    }
+    if (!dragOrigin.current || heldButton.current == null) {
       return;
     }
     const origin = dragOrigin.current;
-    const point = pointFromEvent(event, shot);
+    const button = heldButton.current;
+    const moved = dragging.current;
     dragOrigin.current = null;
-    if (dragging.current) {
-      dragging.current = false;
-      void run(
-        `drag ${origin.x},${origin.y} → ${point.x},${point.y}`,
-        () => dragAction(id, origin.x, origin.y, point.x, point.y, 1),
-        {
-          op: "drag",
-          x1: origin.x,
-          y1: origin.y,
-          x2: point.x,
-          y2: point.y,
-          button: 1,
-        },
-      );
+    dragging.current = false;
+    heldButton.current = null;
+    if (moved) {
+      recordPointerStep({
+        op: "drag",
+        x1: origin.x,
+        y1: origin.y,
+        x2: event.x,
+        y2: event.y,
+        button,
+      });
       return;
     }
-    const button = event.button === 2 ? 3 : 1;
-    void run(
-      `click ${point.x},${point.y}`,
-      () => clickAction(id, point.x, point.y, button),
-      { op: "click", x: point.x, y: point.y, button },
-    );
-  }
-
-  function onDoubleClick(event: React.MouseEvent<HTMLImageElement>) {
-    if (!shot || disabled) {
+    const now = Date.now();
+    const prev = lastClick.current;
+    if (
+      prev &&
+      now - prev.at < 400 &&
+      Math.abs(prev.x - origin.x) < 4 &&
+      Math.abs(prev.y - origin.y) < 4
+    ) {
+      lastClick.current = null;
+      recordPointerStep({
+        op: "double_click",
+        x: origin.x,
+        y: origin.y,
+        button,
+      });
       return;
     }
-    event.preventDefault();
-    const point = pointFromEvent(event, shot);
-    void run(
-      `double_click ${point.x},${point.y}`,
-      () => doubleClickAction(id, point.x, point.y, 1),
-      { op: "double_click", x: point.x, y: point.y, button: 1 },
-    );
+    lastClick.current = { x: origin.x, y: origin.y, at: now };
+    recordPointerStep({ op: "click", x: origin.x, y: origin.y, button });
   }
 
-  function onWheel(event: React.WheelEvent<HTMLImageElement>) {
-    if (!shot || disabled) {
+  function onGuestWheel(event: VncGuestWheel) {
+    if (disabled || !recordActions) {
       return;
     }
-    event.preventDefault();
-    const point = pointFromEvent(event, shot);
-    const dy = event.deltaY === 0 ? 0 : event.deltaY > 0 ? 120 : -120;
-    const dx = event.deltaX === 0 ? 0 : event.deltaX > 0 ? 120 : -120;
-    if (dx === 0 && dy === 0) {
+    cancelIdleFlush();
+    commitLog(coalescer.current.flush(Date.now()));
+    commitLog([{ op: "scroll", x: event.x, y: event.y, dx: event.dx, dy: event.dy }]);
+  }
+
+  function onGuestKeyDown(event: KeyboardEvent) {
+    if (disabled || !recordActions || event.isComposing) {
       return;
     }
-    void run(
-      `scroll ${dx},${dy}`,
-      () => scrollAction(id, dx, dy, point.x, point.y),
-      { op: "scroll", x: point.x, y: point.y, dx, dy },
-    );
+    // Modifier down/up is not a recipe step. Ctrl+L is one tap via browserEventToCua.
+    if (browserModifierToCua(event)) {
+      return;
+    }
+    const mapped = browserEventToCua(event);
+    if (!mapped) {
+      return;
+    }
+    const now = Date.now();
+    if (mapped.kind === "type") {
+      commitLog(coalescer.current.pushType(mapped.text, now));
+      scheduleIdleFlush();
+      return;
+    }
+    if (mapped.key === "BackSpace") {
+      commitLog(coalescer.current.backspace(now));
+      if (coalescer.current.draft()) {
+        scheduleIdleFlush();
+      } else {
+        cancelIdleFlush();
+      }
+      return;
+    }
+    cancelIdleFlush();
+    commitLog(coalescer.current.flushThen({ op: "key", key: mapped.key }, now));
   }
 
-  function onContextMenu(event: React.MouseEvent<HTMLImageElement>) {
-    event.preventDefault();
+  function onGuestKeyUp(_event: KeyboardEvent) {
+    // Combined keys are recorded on keydown as one tap.
   }
 
-  function startRecording() {
-    setSteps([]);
-    stepsRef.current = [];
-    lastActionAt.current = Date.now();
-    setRecording(true);
-    setStatus("Recording. Click, type, and scroll on the desktop.");
+  function startTeaching() {
+    teachingFrom.current = stepsRef.current.length;
+    setTeaching(true);
+    setStatus("Teaching. Click, type, and scroll — Save to Recipe when done.");
   }
 
   function stopAndSend() {
-    setRecording(false);
-    const recorded = stepsRef.current;
+    cancelIdleFlush();
+    commitLog(coalescer.current.flush(Date.now()));
+    setTeaching(false);
+    const recorded = stepsRef.current.slice(teachingFrom.current);
     if (recorded.length === 0) {
       setStatus("Nothing recorded.");
       return;
     }
-    onSendToRecipe(planFromRecording(recorded, "recorded"));
+    const v1 = foldOmniboxChords(recorded.map((step) => ({ ...step })));
+    const v2 = compressRecipeSteps(v1);
+    onSendToRecipe({
+      planJson: planFromRecording(v2, "recorded"),
+      v1,
+      v2,
+    });
   }
 
-  const frame = (
-    <div className="space-y-2">
-      {shot ? (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          alt="Box desktop"
-          src={`data:image/png;base64,${shot.png}`}
-          draggable={false}
-          onPointerDown={onPointerDown}
-          onPointerMove={onPointerMove}
-          onPointerUp={onPointerUp}
-          onDoubleClick={onDoubleClick}
-          onWheel={onWheel}
-          onContextMenu={onContextMenu}
-          className={`cursor-crosshair select-none rounded-lg border border-zinc-200 bg-black ${
-            maximized ? "max-h-[calc(100vh-5rem)] max-w-full object-contain" : "w-full max-w-5xl"
-          }`}
-        />
-      ) : (
-        <p className="text-sm text-zinc-500">
-          {disabled
-            ? "Workspace is not ready."
-            : "Fetching the first frame…"}
-        </p>
-      )}
+  function clearLogs() {
+    cancelIdleFlush();
+    coalescer.current.clear();
+    setSteps([]);
+    stepsRef.current = [];
+    lastActionAt.current = 0;
+    teachingFrom.current = 0;
+    setStatus("Logs cleared.");
+  }
+
+  const teachCount = Math.max(0, steps.length - teachingFrom.current);
+
+  const overlayCopy = disabled
+    ? "Workspace is not ready."
+    : phase === "connected"
+      ? null
+      : phase === "error" || (phase === "disconnected" && error)
+        ? error || "Disconnected from the live desktop."
+        : phase === "disconnected"
+          ? "Disconnected from the live desktop."
+          : "Connecting to the live desktop…";
+
+  const showReconnect =
+    !disabled && (phase === "disconnected" || phase === "error");
+
+  const surface = (
+    <div className="absolute inset-0" onContextMenu={(event) => event.preventDefault()}>
+      <VncSurface
+        id={id}
+        disabled={disabled}
+        active={active}
+        session={session}
+        recording={recordActions}
+        onPhase={setPhase}
+        onError={setError}
+        onGuestPointer={onGuestPointer}
+        onGuestWheel={onGuestWheel}
+        onGuestKeyDown={onGuestKeyDown}
+        onGuestKeyUp={onGuestKeyUp}
+      />
+      {overlayCopy ? (
+        <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-[#1c4a6e]/80 px-4 text-center text-sm text-white/90">
+          <p>{overlayCopy}</p>
+          {showReconnect ? (
+            <Button
+              type="button"
+              variant="chrome"
+              onClick={() => {
+                setError(null);
+                setSession((value) => value + 1);
+              }}
+            >
+              Reconnect
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 
-  const toolbar = (
-    <div className="flex flex-wrap items-center gap-2">
-      <Button type="button" disabled={disabled || busy} onClick={() => void refresh()}>
-        {busy ? "Working…" : "Refresh"}
-      </Button>
-      <Button
-        type="button"
-        variant={live ? "default" : "outline"}
-        disabled={disabled}
-        onClick={() => setLive((value) => !value)}
-      >
-        {live ? "Follow on" : "Follow off"}
-      </Button>
-      <Button
-        type="button"
-        variant="outline"
-        disabled={disabled}
-        onClick={() => setMaximized(true)}
-      >
-        Maximize
-      </Button>
-      <Button
-        type="button"
-        variant={recording ? "destructive" : "outline"}
-        disabled={disabled}
-        onClick={() => (recording ? stopAndSend() : startRecording())}
-      >
-        {recording ? `Stop & use as recipe (${steps.length})` : "Record to recipe"}
-      </Button>
-    </div>
+  const log = (
+    <ActionLog
+      steps={steps}
+      onClear={clearLogs}
+      variant={maximized ? "chrome" : "page"}
+      empty={
+        maximized
+          ? "No clicks, keys, or scrolls recorded yet."
+          : "No actions yet."
+      }
+    />
   );
 
-  const body = (
+  return (
     <div className="space-y-3">
-      <p className="text-sm text-zinc-600">
-        This is the guest framebuffer ({FRAMEBUFFER.width}×{FRAMEBUFFER.height}),
-        not a raw viewer port. Click the picture to click. In Maximize, your
-        keyboard and scroll wheel go to the box. Recipes still cook through
-        Computer Use on the same desktop. Leaving this tab no longer drops the
-        session, so post-cook windows are still on this guest when you come
-        back. Cook screenshots and recordings open on Recipe — they are not a
-        second desktop.
+      <p className="text-sm leading-6 text-muted-foreground">
+        This is a live VNC session of the {FRAMEBUFFER.width}×{FRAMEBUFFER.height}{" "}
+        guest display. Pointer, keyboard, and the guest cursor go through an
+        authenticated EnsureBox proxy — not a screenshot viewer. Origin is
+        top-left. Drag a title bar to move a window; drag an edge or the
+        bottom-right grip to resize. L1 green/yellow/red only control the
+        expanded view. Teach a task and the action log live in that chrome.
+        Recipes still cook through Computer Use on the same desktop. Leaving
+        this tab no longer drops VNC, so a YouTube tab (or anything else) is
+        still on this guest when you come back. Cook screenshots and recordings
+        open on Recipe — they are not a second desktop.
       </p>
-      {toolbar}
-      <p className="text-xs text-zinc-500">{status}</p>
-      {error ? (
+      {error && phase !== "connecting" ? (
         <Alert variant="destructive">
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       ) : null}
-      {recording && steps.length > 0 ? (
-        <ol className="max-h-40 overflow-auto rounded-lg border border-zinc-200 bg-white px-3 py-2 font-mono text-xs">
-          {steps.map((step, index) => (
-            <li key={`${step.op}-${index}`}>
-              {index} {JSON.stringify(step)}
-            </li>
-          ))}
-        </ol>
-      ) : null}
-      {frame}
+      {status ? <p className="text-xs text-muted-foreground">{status}</p> : null}
+      <ComputerUseFrame
+        takeover={maximized && active}
+        teaching={teaching}
+        teachCount={teachCount}
+        disabled={disabled}
+        onEnterTakeover={enterTakeover}
+        onExitTakeover={exitTakeover}
+        onTeachToggle={() => (teaching ? stopAndSend() : startTeaching())}
+        logOpen={logOpen}
+        onToggleLog={() => setLogOpen((open) => !open)}
+        surface={surface}
+        log={maximized && active ? log : undefined}
+        surfaceRef={surfaceRef}
+      />
     </div>
-  );
-
-  if (!maximized || !active) {
-    return body;
-  }
-
-  return (
-    <>
-      {body}
-      <div className="fixed inset-0 z-50 flex flex-col bg-zinc-950 text-zinc-50">
-        <div className="flex flex-wrap items-center gap-2 border-b border-zinc-800 px-3 py-2">
-          <p className="text-sm">Desktop — click, type, scroll. Esc exits.</p>
-          <span className="flex-1" />
-          {recording ? (
-            <span className="text-xs text-red-300">recording {steps.length} steps</span>
-          ) : null}
-          <Button type="button" variant="outline" onClick={() => setMaximized(false)}>
-            Exit maximize
-          </Button>
-        </div>
-        <div
-          ref={surfaceRef}
-          tabIndex={0}
-          className="flex flex-1 items-center justify-center overflow-hidden p-3 outline-none"
-        >
-          {frame}
-        </div>
-      </div>
-    </>
   );
 }

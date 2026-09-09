@@ -7,6 +7,12 @@ authors.workspace = true
 description = "Layer 3 exec daemon: shell, files, and workspace jail"
 rust-version.workspace = true
 
+[features]
+default = ["mimalloc"]
+# Process-wide mimalloc (see box-common). Off with --no-default-features if a
+# host allocator wins the CUA benches.
+mimalloc = ["box-common/mimalloc"]
+
 [dependencies]
 box-common = { workspace = true }
 box-cua = { workspace = true }
@@ -20,6 +26,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 http = { workspace = true }
 libc = { workspace = true }
+base64 = { workspace = true }
 
 [dev-dependencies]
 http-body-util = { workspace = true }

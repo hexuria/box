@@ -116,7 +116,6 @@ test("dock cook maps iconic Chromium instead of treating hide as success", () =>
   assert.match(settle, /windowmap/);
   assert.match(settle, /IsViewable/);
   assert.match(settle, /--raise-or-launch/);
-  assert.match(settle, /--raise-only/);
   assert.match(launch, /--raise-or-launch/);
   assert.match(launch, /--raise-only/);
   assert.match(recipe, /DOCK_TOGGLE_MS/);

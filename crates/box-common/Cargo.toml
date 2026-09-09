@@ -7,7 +7,14 @@ authors.workspace = true
 description = "Shared types, auth, and workspace path jail for grok-box"
 rust-version.workspace = true
 
+[features]
+default = []
+# Microsoft mimalloc as #[global_allocator] for any binary that enables this
+# (box-exec / box-host). Bun-style general-purpose heap, not a bump arena.
+mimalloc = ["dep:mimalloc"]
+
 [dependencies]
+mimalloc = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -16,6 +23,7 @@ http = { workspace = true }
 subtle = { workspace = true }
 tower-http = { workspace = true }
 tracing = { workspace = true }
+smallvec = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

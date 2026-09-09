@@ -88,7 +88,8 @@ start_desktop() {
   fi
 
   echo "starting Xvfb ${BOX_DISPLAY} ${xvfb_screen}"
-  Xvfb "${BOX_DISPLAY}" -screen 0 "${xvfb_screen}" -ac +extension GLX +render -noreset &
+  # XTEST is required for in-process CUA. DAMAGE lets x11vnc push dirty rects.
+  Xvfb "${BOX_DISPLAY}" -screen 0 "${xvfb_screen}" -ac +extension GLX +extension XTEST +extension DAMAGE +render -noreset &
   record $!
 
   local n=0
@@ -118,6 +119,7 @@ start_desktop() {
   vnc_pass=""
 
   echo "starting x11vnc on ${BOX_VNC_BIND} (localhost only)"
+  # LAN flags: XDAMAGE (not polling the whole 1280×800), short wait/defer.
   x11vnc \
     -display "${BOX_DISPLAY}" \
     -rfbport "$(vnc_port)" \
@@ -125,7 +127,11 @@ start_desktop() {
     -rfbauth "${passfile}" \
     -forever \
     -shared \
-    -noxdamage \
+    -xdamage \
+    -nowireframe \
+    -speeds lan \
+    -wait 10 \
+    -defer 5 \
     >/tmp/x11vnc.log 2>&1 &
   record $!
 
@@ -137,7 +143,7 @@ start_desktop() {
   # 0.0.0.0 *inside* the container so Docker port-map to the veth IP works.
   # Host publish is 127.0.0.1:6080. 6080 is not Bearer-authenticated.
   echo "starting noVNC/websockify on 0.0.0.0:${BOX_NOVNC_PORT} (host publish should be loopback)"
-  websockify --web="${BOX_NOVNC_WEB}" "0.0.0.0:${BOX_NOVNC_PORT}" "${BOX_VNC_BIND}" \
+  websockify-nodelay --web="${BOX_NOVNC_WEB}" "0.0.0.0:${BOX_NOVNC_PORT}" "${BOX_VNC_BIND}" \
     >/tmp/websockify.log 2>&1 &
   record $!
 }

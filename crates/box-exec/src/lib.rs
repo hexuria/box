@@ -1,7 +1,8 @@
 //! HTTP exec daemon for grok-box (`box-exec`).
 //!
 //! Shell, workspace files, and Computer Use (CUA) actuators against the
-//! box X display. Inference stays in L4.
+//! box X display. Inference stays in L4. The process-wide heap is mimalloc
+//! when the `mimalloc` feature is on (default); see `box_common::GLOBAL_ALLOCATOR`.
 
 mod cua;
 mod exec;
@@ -13,7 +14,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use axum::Router;
-use box_common::{cors_layer, BoxConfig};
+use box_common::{cors_layer, BoxConfig, GLOBAL_ALLOCATOR};
 use box_cua::CuaConfig;
 use tokio::net::TcpListener;
 use tower_http::limit::RequestBodyLimitLayer;
@@ -37,8 +38,9 @@ pub struct AppState {
 
 impl AppState {
     pub fn from_config(config: &BoxConfig) -> Self {
+        let workspace = canonicalize_workspace(&config.workspace);
         Self {
-            workspace: config.workspace.clone(),
+            workspace,
             token: config.token.clone(),
             max_file_bytes: config.max_file_bytes,
             default_timeout: config.default_timeout,
@@ -47,6 +49,11 @@ impl AppState {
             cua: CuaConfig::from_env(),
         }
     }
+}
+
+fn canonicalize_workspace(path: &std::path::Path) -> PathBuf {
+    let _ = std::fs::create_dir_all(path);
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 pub fn router(state: AppState) -> Router {
@@ -64,9 +71,14 @@ pub async fn serve(config: BoxConfig) -> Result<(), Box<dyn std::error::Error + 
     tracing::info!(
         %bind,
         workspace = %config.workspace.display(),
+        allocator = GLOBAL_ALLOCATOR,
         "box-exec listening"
     );
     let listener = TcpListener::bind(bind).await?;
+    let warmup_cfg = CuaConfig::from_env();
+    tokio::spawn(async move {
+        box_cua::warmup_pointer(&warmup_cfg).await;
+    });
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
