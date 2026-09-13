@@ -39,6 +39,9 @@ export type ExecRequest = {
   timeout_ms?: number;
   env?: Record<string, string>;
   stdin?: string | null;
+  detach?: boolean;
+  /** Deferred: guest returns 400. Use execStream(). */
+  pty?: boolean;
 };
 
 export type ExecResponse = {
@@ -49,6 +52,9 @@ export type ExecResponse = {
   duration_ms: number;
   truncated: boolean;
   cwd: string;
+  exec_id?: string;
+  detached?: boolean;
+  status?: string;
 };
 
 export type FilePutRequest = {
@@ -77,12 +83,22 @@ export type RecipeStep =
   | { op: "double_click" | "double-click"; x: number; y: number; button?: number }
   | { op: "move"; x: number; y: number }
   | { op: "drag"; x1: number; y1: number; x2: number; y2: number; button?: number }
+  | { op: "press" | "mousedown"; x: number; y: number; button?: number }
+  | {
+      op: "release" | "mouseup";
+      x?: number;
+      y?: number;
+      button?: number;
+      path?: { x: number; y: number }[];
+    }
   | { op: "type"; text: string }
-  | { op: "key"; key: string }
+  | { op: "key"; key: string; action?: "tap" | "down" | "up" }
   | { op: "scroll"; x: number; y: number; dx: number; dy: number }
   | { op: "wait"; ms: number }
   | { op: "screenshot" }
   | { op: "reset_desktop" | "reset" };
+
+export type RecipeSettle = "off" | "compressed" | "raw";
 
 export type RecipeRequest = {
   name?: string;
@@ -90,6 +106,7 @@ export type RecipeRequest = {
   screenshot?: RecipeScreenshot;
   record?: boolean;
   artifact_dir?: string;
+  settle?: RecipeSettle;
   steps: RecipeStep[];
 };
 
@@ -162,6 +179,27 @@ export class GrokBox {
     return this.authJson("POST", `${this.execUrl}/v1/exec`, request, timeoutMs);
   }
 
+  async execStream(request: ExecRequest, timeoutMs = 120_000): Promise<string> {
+    const response = await this.raw("POST", `${this.execUrl}/v1/exec/stream`, {
+      headers: {
+        authorization: `Bearer ${this.token}`,
+        accept: "application/x-ndjson",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(request),
+      timeoutMs,
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      throw new GrokBoxError(`exec stream returned ${response.status}`, response.status, text);
+    }
+    return text;
+  }
+
+  async execStatus(id: string): Promise<ExecResponse> {
+    return this.authJson("GET", `${this.execUrl}/v1/exec/${encodeURIComponent(id)}`);
+  }
+
   async filesGet(path: string, encoding?: string): Promise<unknown> {
     const query = new URLSearchParams({ path });
     if (encoding) {
@@ -190,6 +228,60 @@ export class GrokBox {
     parents = true,
   ): Promise<{ path: string; created: boolean }> {
     return this.authJson("POST", `${this.execUrl}/v1/files/mkdir`, { path, parents });
+  }
+
+  async filesRename(from: string, to: string): Promise<{ from: string; to: string }> {
+    return this.authJson("POST", `${this.execUrl}/v1/files/rename`, { from, to });
+  }
+
+  async filesGetRaw(path: string): Promise<Uint8Array> {
+    const query = new URLSearchParams({ path });
+    const response = await this.raw("GET", `${this.execUrl}/v1/files/raw?${query.toString()}`, {
+      headers: { accept: "application/octet-stream" },
+    });
+    if (!response.ok) {
+      const body = await parseBody(response);
+      throw new GrokBoxError(`raw GET returned ${response.status}`, response.status, body);
+    }
+    return new Uint8Array(await response.arrayBuffer());
+  }
+
+  async filesPutRaw(path: string, body: Uint8Array | ArrayBuffer): Promise<{ path: string; bytes_written: number }> {
+    const query = new URLSearchParams({ path });
+    const response = await this.raw("PUT", `${this.execUrl}/v1/files/raw?${query.toString()}`, {
+      headers: { "content-type": "application/octet-stream", accept: "application/json" },
+      body: body instanceof Uint8Array ? body : new Uint8Array(body),
+    });
+    const parsed = await parseBody(response);
+    if (!response.ok) {
+      throw new GrokBoxError(`raw PUT returned ${response.status}`, response.status, parsed);
+    }
+    return parsed as { path: string; bytes_written: number };
+  }
+
+  async desktop(): Promise<unknown> {
+    return this.authJson("GET", `${this.hostUrl}/v1/desktop`);
+  }
+
+  async chrome(): Promise<unknown> {
+    return this.authJson("GET", `${this.hostUrl}/v1/chrome`);
+  }
+
+  async windows(): Promise<unknown> {
+    return this.authJson("GET", `${this.hostUrl}/v1/desktop/windows`);
+  }
+
+  async busy(): Promise<unknown> {
+    return this.authJson("GET", `${this.execUrl}/v1/busy`);
+  }
+
+  async metrics(): Promise<unknown> {
+    return this.authJson("GET", `${this.execUrl}/v1/metrics`);
+  }
+
+  async shutdown(target: "exec" | "host" = "exec"): Promise<unknown> {
+    const base = target === "host" ? this.hostUrl : this.execUrl;
+    return this.authJson("POST", `${base}/v1/shutdown`);
   }
 
   async screenshot(): Promise<ScreenshotResponse> {
@@ -230,6 +322,19 @@ export class GrokBox {
     return this.authJson("POST", `${this.execUrl}/v1/cua/drag`, { x1, y1, x2, y2, button });
   }
 
+  async press(x: number, y: number, button?: number): Promise<CuaOk> {
+    return this.authJson("POST", `${this.execUrl}/v1/cua/press`, { x, y, button });
+  }
+
+  async release(
+    x?: number,
+    y?: number,
+    button?: number,
+    path?: { x: number; y: number }[],
+  ): Promise<CuaOk> {
+    return this.authJson("POST", `${this.execUrl}/v1/cua/release`, { x, y, button, path });
+  }
+
   async type(text: string): Promise<CuaOk> {
     return this.authJson("POST", `${this.execUrl}/v1/cua/type`, { text });
   }
@@ -265,6 +370,7 @@ export class GrokBox {
     const headers: Record<string, string> = {
       authorization: `Bearer ${this.token}`,
       accept: "application/json",
+      "x-request-id": crypto.randomUUID?.() ?? `ts-${Date.now()}`,
     };
     const init: RequestInit = { method, headers, cache: "no-store" };
     if (body !== undefined) {
@@ -291,6 +397,9 @@ export class GrokBox {
     const headers = new Headers(init.headers);
     if (!headers.has("authorization")) {
       headers.set("authorization", `Bearer ${this.token}`);
+    }
+    if (!headers.has("x-request-id")) {
+      headers.set("x-request-id", crypto.randomUUID?.() ?? `ts-${Date.now()}`);
     }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), init.timeoutMs ?? 30_000);

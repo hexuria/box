@@ -42,11 +42,32 @@ enum Commands {
         timeout_ms: Option<u64>,
         #[arg(long)]
         stdin: Option<String>,
+        #[arg(long)]
+        stream: bool,
+        #[arg(long)]
+        detach: bool,
         #[arg(required = true, num_args = 1.., trailing_var_arg = true)]
         command: Vec<String>,
     },
+    /// GET /v1/exec/{id} (detached job)
+    ExecStatus { id: String },
     #[command(subcommand)]
     Files(FilesCmd),
+    /// GET host /v1/desktop
+    Desktop,
+    /// GET host /v1/chrome
+    Chrome,
+    /// GET host /v1/desktop/windows
+    Windows,
+    /// GET exec /v1/busy
+    Busy,
+    /// GET exec /v1/metrics
+    Metrics,
+    /// POST /v1/shutdown (exec, or --host)
+    Shutdown {
+        #[arg(long)]
+        host: bool,
+    },
     #[command(subcommand)]
     Cua(CuaCmd),
 }
@@ -57,6 +78,11 @@ enum FilesCmd {
         path: String,
         #[arg(long)]
         encoding: Option<String>,
+        /// Write GET /v1/files/raw bytes to a file (or stdout if omitted)
+        #[arg(long)]
+        raw: bool,
+        #[arg(long, short)]
+        output: Option<PathBuf>,
     },
     Put {
         path: String,
@@ -66,6 +92,9 @@ enum FilesCmd {
         file: Option<PathBuf>,
         #[arg(long)]
         encoding: Option<String>,
+        /// PUT /v1/files/raw from --file
+        #[arg(long)]
+        raw: bool,
     },
     Delete {
         path: String,
@@ -76,6 +105,10 @@ enum FilesCmd {
         path: String,
         #[arg(long)]
         no_parents: bool,
+    },
+    Rename {
+        from: String,
+        to: String,
     },
 }
 
@@ -183,45 +216,75 @@ async fn main() -> Result<()> {
             cwd,
             timeout_ms,
             stdin,
+            stream,
+            detach,
             command,
         } => {
-            let result = box_client
-                .exec(&ExecRequest {
-                    command: json!(command),
-                    cwd,
-                    timeout_ms,
-                    env: None,
-                    stdin,
-                })
-                .await?;
-            print_json(&result)?;
+            let request = ExecRequest {
+                command: json!(command),
+                cwd,
+                timeout_ms,
+                env: None,
+                stdin,
+                detach: if detach { Some(true) } else { None },
+                pty: None,
+            };
+            if stream {
+                print!("{}", box_client.exec_stream(&request).await?);
+            } else {
+                print_json(&box_client.exec(&request).await?)?;
+            }
         }
+        Commands::ExecStatus { id } => print_json(&box_client.exec_status(&id).await?)?,
         Commands::Files(cmd) => match cmd {
-            FilesCmd::Get { path, encoding } => {
-                print_json(&box_client.files_get(&path, encoding.as_deref()).await?)?;
+            FilesCmd::Get {
+                path,
+                encoding,
+                raw,
+                output,
+            } => {
+                if raw {
+                    let bytes = box_client.files_get_raw(&path).await?;
+                    if let Some(path) = output {
+                        std::fs::write(&path, &bytes)
+                            .with_context(|| format!("write {}", path.display()))?;
+                    } else {
+                        std::io::stdout().write_all(&bytes)?;
+                    }
+                } else {
+                    print_json(&box_client.files_get(&path, encoding.as_deref()).await?)?;
+                }
             }
             FilesCmd::Put {
                 path,
                 content,
                 file,
                 encoding,
+                raw,
             } => {
-                let content = if let Some(file) = file {
-                    std::fs::read_to_string(&file)
-                        .with_context(|| format!("read {}", file.display()))?
+                if raw {
+                    let file = file.context("--file is required with --raw")?;
+                    let bytes =
+                        std::fs::read(&file).with_context(|| format!("read {}", file.display()))?;
+                    print_json(&box_client.files_put_raw(&path, bytes).await?)?;
                 } else {
-                    content.context("--content or --file is required")?
-                };
-                print_json(
-                    &box_client
-                        .files_put(&FilePutRequest {
-                            path,
-                            content,
-                            encoding,
-                            create_dirs: Some(true),
-                        })
-                        .await?,
-                )?;
+                    let content = if let Some(file) = file {
+                        std::fs::read_to_string(&file)
+                            .with_context(|| format!("read {}", file.display()))?
+                    } else {
+                        content.context("--content or --file is required")?
+                    };
+                    print_json(
+                        &box_client
+                            .files_put(&FilePutRequest {
+                                path,
+                                content,
+                                encoding,
+                                create_dirs: Some(true),
+                            })
+                            .await?,
+                    )?;
+                }
             }
             FilesCmd::Delete { path, recursive } => {
                 print_json(&box_client.files_delete(&path, recursive).await?)?;
@@ -236,7 +299,16 @@ async fn main() -> Result<()> {
                         .await?,
                 )?;
             }
+            FilesCmd::Rename { from, to } => {
+                print_json(&box_client.files_rename(&from, &to).await?)?;
+            }
         },
+        Commands::Desktop => print_json(&box_client.desktop().await?)?,
+        Commands::Chrome => print_json(&box_client.chrome().await?)?,
+        Commands::Windows => print_json(&box_client.windows().await?)?,
+        Commands::Busy => print_json(&box_client.busy().await?)?,
+        Commands::Metrics => print_json(&box_client.metrics().await?)?,
+        Commands::Shutdown { host } => print_json(&box_client.shutdown(host).await?)?,
         Commands::Cua(cmd) => match cmd {
             CuaCmd::Screenshot { png, output } => {
                 if png {

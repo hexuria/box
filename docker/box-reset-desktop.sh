@@ -1,7 +1,7 @@
 #!/bin/bash
-# Restore a clean, empty guest desktop without restarting Docker / X / VNC.
-# Close every client window, kill leftover GUI apps and terminal jobs, leave
-# tint2 + Openbox + x11vnc running so the next dock click is a fresh instance.
+# Restore a clean guest desktop without restarting Docker / X / VNC / Chromium.
+# Close non-Chromium client windows and leftover jobs. Leave tint2 + Openbox +
+# x11vnc + the entrypoint Chromium process running (one Chromium model).
 set -uo pipefail
 
 export DISPLAY="${DISPLAY:-${BOX_DISPLAY:-:1}}"
@@ -12,7 +12,7 @@ self="$$"
 
 protected_comm() {
   case "$1" in
-    tini|entrypoint.sh|box-exec|box-host|Xvfb|Xorg|openbox|tint2|x11vnc|websockify|websockify-nodelay|dbus-daemon|dbus-launch|pipewire|pipewire-pulse|pulseaudio|ssh-agent|gpg-agent|ffmpeg|sleep)
+    tini|entrypoint.sh|box-exec|box-host|Xvfb|Xorg|openbox|tint2|x11vnc|websockify|websockify-nodelay|dbus-daemon|dbus-launch|pipewire|pipewire-pulse|pulseaudio|ssh-agent|gpg-agent|ffmpeg|sleep|chromium|chrome)
       return 0
       ;;
   esac
@@ -24,10 +24,10 @@ protected_class() {
   inst="${1%%.*}"
   cls="${1#*.}"
   case "${inst}" in
-    tint2|Tint2|Openbox|openbox|xfdesktop|N/A|"") return 0 ;;
+    tint2|Tint2|Openbox|openbox|xfdesktop|N/A|Chromium|chromium|Google-chrome|google-chrome|"") return 0 ;;
   esac
   case "${cls}" in
-    tint2|Tint2|Openbox|openbox|xfdesktop|N/A|"") return 0 ;;
+    tint2|Tint2|Openbox|openbox|xfdesktop|N/A|Chromium|chromium|Google-chrome|google-chrome|"") return 0 ;;
   esac
   return 1
 }
@@ -47,14 +47,11 @@ close_windows() {
 }
 
 kill_gui() {
-  # Specific WM_CLASS apps the dock launches. Never kill bash, box-exec, or ffmpeg.
-  pkill -u "${uid}" -x chromium >/dev/null 2>&1 || true
-  pkill -u "${uid}" -x chrome >/dev/null 2>&1 || true
+  # Close helper GUI apps. Never kill Chromium: the entrypoint owns that
+  # process and will respawn it if we SIGTERM it.
   pkill -u "${uid}" -x xfce4-terminal >/dev/null 2>&1 || true
   pkill -u "${uid}" -x thunar >/dev/null 2>&1 || true
   pkill -u "${uid}" -x Thunar >/dev/null 2>&1 || true
-  pkill -u "${uid}" -f '/usr/lib/chromium/chromium' >/dev/null 2>&1 || true
-  pkill -u "${uid}" -f '/usr/lib/chromium-browser/' >/dev/null 2>&1 || true
 }
 
 kill_stray_jobs() {
@@ -83,6 +80,10 @@ kill_stray_jobs() {
     esac
     case "${comm}" in
       chromium|chrome|xfce4-terminal|thunar|Thunar|xterm|uxterm|gnome-terminal|mousepad|gedit)
+        # Chromium is protected_comm; this branch is for other GUI leftovers.
+        if [[ "${comm}" == "chromium" || "${comm}" == "chrome" ]]; then
+          continue
+        fi
         kill -TERM "${pid}" >/dev/null 2>&1 || true
         ;;
       yes|curl|wget|mpv|vlc)

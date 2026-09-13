@@ -15,8 +15,8 @@ License: **MIT**. MSRV: Rust **1.85**.
 | `box-host` `:1340` | Health, ready, identity, desktop/chrome status |
 | CLI `grok-box` | Same surface as the SDKs |
 | SDKs | Connect with `(execUrl, hostUrl, token)` — no `docker run` helper |
-| [`ensurebox/`](ensurebox/) | **Demo only** — sample orchestrator / operator UI (not a supported control plane) |
-| [`l1/`](l1/) | **Demo only** — sample human workspace UI (talks only to EnsureBox) |
+| [`ensurebox/`](ensurebox/) | **Frozen demo / non-product** — sample orchestrator / operator UI (not a supported control plane) |
+| [`l1/`](l1/) | **Frozen demo / non-product** — sample human workspace UI (talks only to EnsureBox) |
 
 Windows and macOS are clients or Docker hosts. The box OS is always this Linux image.
 
@@ -127,6 +127,8 @@ cd l1 && cp .env.example .env && npm install && npm run dev          # human wor
 | 5900 | **no** | x11vnc | `BOX_VNC_BIND=127.0.0.1:5900` inside the image |
 | 9222 | **no** | Chromium CDP | `127.0.0.1` only (`BOX_CDP_PORT`). Do not publish. |
 
+Compose also sets `cap_drop: [ALL]`, `security_opt: [no-new-privileges:true]`, `pids_limit: 1024`, and `mem_limit: 4g`. That is **not** a kernel sandbox. The guest is an unprivileged uid-1000 container; Chromium still uses `--no-sandbox`.
+
 ## Environment
 
 | Variable | Default (image) | Meaning |
@@ -151,6 +153,9 @@ cd l1 && cp .env.example .env && npm install && npm run dev          # human wor
 | `BOX_CHROME_PROFILE` | `/home/box/chrome-profile` | Persistent profile (compose volume) |
 | `BOX_CDP_PORT` | `9222` | CDP on `127.0.0.1` only |
 | `BOX_CUA` | `1` | Enable `/v1/cua/*` |
+| `BOX_MAX_CONCURRENT_EXECS` | `8` | Max simultaneous `POST /v1/exec` (and stream/detach). Extra calls get `429 busy`. |
+| `BOX_MAX_DIR_ENTRIES` | `4096` | Cap on directory listings (`truncated: true` if hit) |
+| `BOX_EXEC_KILL_GRACE_MS` | `2000` | After exec timeout, wait this long after SIGTERM before SIGKILL |
 
 ## Auth
 

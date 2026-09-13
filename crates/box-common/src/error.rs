@@ -78,6 +78,10 @@ impl ApiError {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", message)
     }
 
+    pub fn busy(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::TOO_MANY_REQUESTS, "busy", message)
+    }
+
     pub fn status(&self) -> StatusCode {
         match self {
             Self::Status { status, .. } => *status,

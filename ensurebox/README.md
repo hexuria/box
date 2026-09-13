@@ -1,4 +1,4 @@
-# EnsureBox (demo)
+# EnsureBox (frozen demo / non-product)
 
 Sample orchestrator for [grok-box](https://github.com/hexuria/box). It is **not** a supported production control plane. The product is the guest image, CLI, and SDKs; this app shows one way to start a guest and proxy HTTP.
 

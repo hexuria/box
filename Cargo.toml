@@ -44,6 +44,9 @@ clap = { version = "4.5", features = ["derive", "env"] }
 anyhow = "1"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "tls12", "ring", "webpki-tokio"] }
+futures-util = "0.3"
+tokio-stream = "0.1"
 x11rb = { version = "0.13", default-features = true, features = ["xtest", "image"] }
 png = "0.17"
 smallvec = "1.13"

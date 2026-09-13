@@ -1,4 +1,4 @@
-# L1 (demo)
+# L1 (frozen demo / non-product)
 
 Sample human UI for [grok-box](https://github.com/hexuria/box): workspaces with shell, files, and desktop. It is a **demo**, not part of the guest image.
 

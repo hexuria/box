@@ -14,7 +14,7 @@ Vultr is a different company and a different API. Tokens, Terraform providers, a
 
 The **product** is:
 
-- the guest Docker image (`grok-box:local` in Compose — there is **no** published registry image in this repo)
+- the guest Docker image (`grok-box:local` in Compose; tagged releases can push `ghcr.io/<owner>/box`)
 - `box-exec` + `box-host` inside that image
 - the connect-only `grok-box` CLI and TypeScript / Python / Rust SDKs
 
@@ -31,7 +31,7 @@ Production consumers are CLI/SDK against the guest HTTP wire (`:1337` exec, `:13
 
 ### What the guest actually is
 
-One **unprivileged** container (user `box`, **uid 1000**). Not privileged. No extra capabilities. **No** `docker.sock`. Chromium is started with `--no-sandbox` because it is not root.
+One **unprivileged** container (user `box`, **uid 1000**). Not privileged. Compose drops all capabilities and sets `no-new-privileges` plus pids/memory limits. **That is not a kernel sandbox.** **No** `docker.sock`. Chromium is started with `--no-sandbox` because it is not root.
 
 Inside (see [`docs/ARCHITECTURE.md`](ARCHITECTURE.md)):
 
@@ -83,7 +83,7 @@ Optional later: a domain + DNS at Akamai or elsewhere (only for public HTTPS). T
 
 ## C. Instance / machine sizing
 
-This guest is **RAM-heavy**: Debian + Xvfb + openbox + Chromium + two Rust daemons. The **first** deploy also **builds the image on the VM** (Rust `1.85` builder compiles `box-exec` / `box-host`, then a `debian:bookworm-slim` runtime with Chromium). There is no GHCR/ECR image in this repo today.
+This guest is **RAM-heavy**: Debian + Xvfb + openbox + Chromium + two Rust daemons. The **first** deploy also **builds the image on the VM** (Rust `1.85` builder compiles `box-exec` / `box-host`, then a `debian:bookworm-slim` runtime with Chromium). `.github/workflows/publish-image.yml` can push GHCR on `v*` tags; until you pull that, build on the VM.
 
 | Plan | Type slug | vCPU | RAM | Disk | ~price (core regions, 2026 list — confirm in Cloud Manager) | Verdict |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -247,7 +247,7 @@ Akamai Cloud Compute **is** Linode. The OpenTofu/Terraform provider for **VMs** 
 
 **Pros:** Obvious, debuggable, matches local README. **Cons:** Click-ops, easy to forget the firewall, first build is heavy.
 
-There is **no** public `grok-box` image in this repository. `image: grok-box:local` is local-only. First test **builds on the VM**.
+`image: grok-box:local` is the Compose default. Tagged `v*` builds can push `ghcr.io/<owner>/box`. First test without a pull still **builds on the VM**.
 
 ### 2. Cloud-init / StackScript / user-data
 
@@ -373,7 +373,7 @@ EnsureBox is a **host Docker** orchestrator (it `docker run`s guests). It does n
 
 Build on a beefy machine or CI, push to **GHCR** (Akamai has **no** first-class managed container registry like ECR — use GHCR, or ECR/GCR/ACR on those clouds). VM only `docker compose pull` / `docker run`.
 
-Until that exists, `git clone && docker compose up --build` is the path.
+Until a tag has been pushed, `git clone && docker compose up --build` is the path. The publish workflow is [`.github/workflows/publish-image.yml`](../.github/workflows/publish-image.yml): on `v*` tags it builds `docker/Dockerfile` and pushes `ghcr.io/<owner>/box`. First publish may need the package set to public in GitHub Packages settings.
 
 ---
 
@@ -449,13 +449,14 @@ After the Akamai VM is up and Compose is healthy:
 
 ## I. Open questions / risks
 
-- **Image build time on the VM.** First `docker compose up --build` compiles Rust in `rust:1.85-bookworm` and apt-installs Chromium. Expect a long first boot. A small VM makes this worse; 8 GB / 4 vCPU is the mitigation.
+- **Image build time on the VM.** First `docker compose up --build` compiles Rust in `rust:1.85-bookworm` and apt-installs Chromium. Expect a long first boot. A small VM makes this worse; 8 GB / 4 vCPU is the mitigation. Tagged releases can push `ghcr.io/hexuria/box` via `.github/workflows/publish-image.yml` (`GITHUB_TOKEN` + `packages: write`). Until you have pulled that image, `git clone && docker compose up --build` is the path.
+- **Rust / TS / Python clients speak HTTPS.** Guest daemons still bind HTTP. Put Caddy/nginx in front for TLS. The Rust crate uses hyper-rustls (webpki roots).
 - **Chromium RAM.** One desktop guest is the design point. Two guests on one 8 GB VM (EnsureBox spawning extras) will hurt.
 - **IPv6.** Akamai assigns it. Cloud Firewall must DROP v6 too, or you published the box on v6 while locking v4.
 - **Compose publishes loopback.** `127.0.0.1:1337:1337` (and 1340/6080). Tailscale-to-public-NIC still will not hit those ports; use an SSH tunnel (including over Tailscale SSH). Health is open but minimal; noVNC is a desktop on loopback.
 - **Desktop vs `BOX_DESKTOP=0`.** If you only need exec/files, turn desktop off (`BOX_DESKTOP=0`, `BOX_DESKTOP_REQUIRED=0`). Ready no longer waits on X. No screenshots, no noVNC. Less RAM. Compose still lists 6080 unless you override ports.
 - **Volume ownership.** uid **1000** must own bind mounts.
-- **No registry.** First test builds from git. Plan a GHCR push before you scale to many VMs.
+- **No registry by default.** First test builds from git. Tag `v*` to run the GHCR workflow before you scale to many VMs.
 - **EnsureBox ≠ Compose guest.** Path 2’s demo orchestrator starts **its own** containers from `GROK_BOX_IMAGE=grok-box:local`. You do not need both a long-lived root Compose stack **and** EnsureBox unless you are deliberately running two different guests.
 - **Provider confusion.** Compute = `linode/linode` + `LINODE_TOKEN`. Not Vultr. Not `akamai/akamai`.
 

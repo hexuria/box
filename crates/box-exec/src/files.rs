@@ -1,10 +1,13 @@
 use std::path::Path;
 
 use axum::extract::{Query, State};
+use axum::http::header;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use box_common::{resolve_in_canonical_jail, ApiError};
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
@@ -41,6 +44,7 @@ pub enum FileGetResponse {
     Directory {
         path: String,
         entries: Vec<DirEntry>,
+        truncated: bool,
     },
 }
 
@@ -117,6 +121,7 @@ pub async fn get(
 
     if meta.is_dir() {
         let mut entries = Vec::new();
+        let mut truncated = false;
         let mut read = tokio::fs::read_dir(&resolved)
             .await
             .map_err(|err| ApiError::io(err.to_string()))?;
@@ -125,6 +130,10 @@ pub async fn get(
             .await
             .map_err(|err| ApiError::io(err.to_string()))?
         {
+            if entries.len() >= state.max_dir_entries {
+                truncated = true;
+                break;
+            }
             let file_type = entry
                 .file_type()
                 .await
@@ -151,6 +160,7 @@ pub async fn get(
         return Ok(Json(FileGetResponse::Directory {
             path: display_under_workspace(&state.workspace, &resolved),
             entries,
+            truncated,
         }));
     }
 
@@ -166,6 +176,11 @@ pub async fn get(
         .await
         .map_err(|err| ApiError::io(err.to_string()))?;
     let want = query.encoding.as_deref().unwrap_or("utf8");
+    if want.eq_ignore_ascii_case("raw") {
+        return Err(ApiError::invalid_request(
+            "raw encoding is on GET /v1/files/raw (application/octet-stream)",
+        ));
+    }
 
     let (encoding, content) = if want.eq_ignore_ascii_case("base64") {
         ("base64", b64_encode(&bytes))
@@ -185,6 +200,98 @@ pub async fn get(
         size: meta.len(),
         encoding,
         content,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FileRawQuery {
+    pub path: Option<String>,
+    pub create_dirs: Option<String>,
+}
+
+pub async fn get_raw(
+    State(state): State<AppState>,
+    Query(query): Query<FileRawQuery>,
+) -> Result<Response, ApiError> {
+    let user_path = query.path.as_deref().unwrap_or("");
+    if user_path.is_empty() {
+        return Err(ApiError::invalid_request("path is required"));
+    }
+    let resolved = resolve_in_canonical_jail(&state.workspace, user_path)?;
+    let meta = tokio::fs::metadata(&resolved).await.map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            ApiError::not_found(format!("not found: {}", resolved.display()))
+        } else {
+            ApiError::io(err.to_string())
+        }
+    })?;
+    if meta.is_dir() {
+        return Err(ApiError::invalid_request(
+            "raw GET is for files; list directories with GET /v1/files",
+        ));
+    }
+    if meta.len() > state.max_file_bytes {
+        return Err(ApiError::payload_too_large(format!(
+            "file is {} bytes; max is {}",
+            meta.len(),
+            state.max_file_bytes
+        )));
+    }
+    let bytes = tokio::fs::read(&resolved)
+        .await
+        .map_err(|err| ApiError::io(err.to_string()))?;
+    Ok(([(header::CONTENT_TYPE, "application/octet-stream")], bytes).into_response())
+}
+
+pub async fn put_raw(
+    State(state): State<AppState>,
+    Query(query): Query<FileRawQuery>,
+    body: Bytes,
+) -> Result<Json<FilePutResponse>, ApiError> {
+    let user_path = query.path.as_deref().unwrap_or("");
+    if user_path.is_empty() {
+        return Err(ApiError::invalid_request("path is required"));
+    }
+    let resolved = resolve_in_canonical_jail(&state.workspace, user_path)?;
+    let root = resolve_in_canonical_jail(&state.workspace, "")?;
+    if resolved == root {
+        return Err(ApiError::invalid_request(
+            "refusing to overwrite the workspace root",
+        ));
+    }
+    if body.len() as u64 > state.max_file_bytes {
+        return Err(ApiError::payload_too_large(format!(
+            "payload is {} bytes; max is {}",
+            body.len(),
+            state.max_file_bytes
+        )));
+    }
+    if resolved.exists() && resolved.is_dir() {
+        return Err(ApiError::invalid_request(
+            "path is a directory; write a file path",
+        ));
+    }
+    let create_dirs = matches!(
+        query
+            .create_dirs
+            .as_deref()
+            .map(|s| s.to_ascii_lowercase())
+            .as_deref(),
+        None | Some("1") | Some("true") | Some("yes")
+    );
+    if create_dirs {
+        if let Some(parent) = resolved.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|err| ApiError::io(err.to_string()))?;
+        }
+    }
+    tokio::fs::write(&resolved, &body)
+        .await
+        .map_err(|err| ApiError::io(err.to_string()))?;
+    Ok(Json(FilePutResponse {
+        path: display_under_workspace(&state.workspace, &resolved),
+        bytes_written: body.len() as u64,
     }))
 }
 

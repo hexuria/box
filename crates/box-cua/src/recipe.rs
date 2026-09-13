@@ -16,9 +16,7 @@ use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
 use crate::cook_record::{recording_mime, start_cook_recorder, stop_cook_recorder, CookRecorder};
-use crate::settle::{
-    close_chromium_windows, dock_click, page_snap, wait_chromium_usable, wait_page_change,
-};
+use crate::settle::{dock_click, page_snap, wait_chromium_usable, wait_page_change};
 use crate::{
     click, double_click, drag, key_inner, move_pointer, press, release_step, screenshot_from_png,
     screenshot_png, scroll, type_text_inner, ClickRequest, CuaConfig, CuaError, CuaPoint,
@@ -47,14 +45,14 @@ pub enum RecipeScreenshot {
     Each,
 }
 
-/// How long cook should wait for Chromium / page paint. `raw` is v1 (teach
-/// waits stay in the plan; these are extra condition waits). `compressed`
-/// is v2/v3 — shorter timeouts so the comparison stays faster.
+/// How long cook should wait for Chromium / page paint. Default is **off**
+/// (no extra Chromium/page waits, no launch/close side effects).
+/// `compressed` / `raw` are opt-in smart waits.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecipeSettle {
-    Off,
     #[default]
+    Off,
     Compressed,
     Raw,
 }
@@ -147,7 +145,7 @@ impl RecipeStep {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct RecipeRequest {
     #[serde(default)]
     pub name: Option<String>,
@@ -166,24 +164,10 @@ pub struct RecipeRequest {
     #[serde(default)]
     pub artifact_dir: Option<String>,
     /// Smart waits for a mapped Chromium window and a title/URL change.
-    /// L1 sends `raw` for v1 and `compressed` for v2/v3.
+    /// Default `off`. Opt in with `compressed` or `raw`. Never launches Chromium.
     #[serde(default)]
     pub settle: Option<RecipeSettle>,
     pub steps: Vec<RecipeStep>,
-}
-
-impl Default for RecipeRequest {
-    fn default() -> Self {
-        Self {
-            name: None,
-            stop_on_error: None,
-            screenshot: None,
-            record: None,
-            artifact_dir: None,
-            settle: None,
-            steps: Vec::new(),
-        }
-    }
 }
 
 impl RecipeRequest {
@@ -660,13 +644,6 @@ pub async fn run_recipe(
         }
     }
 
-    if ok && settle == RecipeSettle::Raw {
-        if matches!(req.steps.last(), Some(RecipeStep::Click { .. })) {
-            close_chromium_windows(config).await;
-            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-        }
-    }
-
     let mut final_shot = None;
     if ok && shot_mode == RecipeScreenshot::End {
         match capture_shot(config, sink.as_ref(), "end.png").await {
@@ -1060,7 +1037,7 @@ mod tests {
         assert_eq!(req.settle_mode(), RecipeSettle::Raw);
         let req: RecipeRequest =
             serde_json::from_str(r#"{"steps":[{"op":"wait","ms":1}]}"#).unwrap();
-        assert_eq!(req.settle_mode(), RecipeSettle::Compressed);
+        assert_eq!(req.settle_mode(), RecipeSettle::Off);
     }
 
     #[test]

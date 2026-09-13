@@ -4,12 +4,13 @@
 //! entrypoint. This crate is a library used by `box-host` to advertise
 //! `capabilities.desktop` and `GET /v1/desktop`. It is not an HTTP daemon.
 //!
-//! Coordinate space for Computer Use is the framebuffer: **1280×800**.
+//! Computer Use coordinates follow `BOX_DISPLAY_GEOM` (default 1280×800).
 
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use box_common::{env_bool, env_nonempty};
 use serde::Serialize;
 
 /// Capability flag name advertised by `box-host`.
@@ -116,6 +117,9 @@ pub fn parse_geometry(geom: &str) -> Option<(u32, u32)> {
 /// Snapshot returned by `GET /v1/desktop`.
 #[derive(Clone, Debug, Serialize)]
 pub struct DesktopStatus {
+    pub enabled: bool,
+    pub ready: bool,
+    /// Same as `ready`. Kept for existing clients / smoke scripts.
     pub available: bool,
     pub display: String,
     pub geometry: String,
@@ -132,8 +136,11 @@ pub struct ViewerInfo {
 
 impl DesktopStatus {
     pub fn from_config(config: &DesktopConfig, advertised_host: &str) -> Self {
+        let ready = config.probe_display();
         Self {
-            available: config.probe_display(),
+            enabled: config.enabled,
+            ready,
+            available: ready,
             display: config.display.clone(),
             geometry: config.geometry.clone(),
             vnc: config.vnc_bind.clone(),
@@ -144,6 +151,73 @@ impl DesktopStatus {
             },
         }
     }
+}
+
+/// One mapped (or listed) X window from `wmctrl -lx`.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct DesktopWindow {
+    pub id: String,
+    pub desktop: i32,
+    pub class: String,
+    pub title: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct WindowList {
+    pub display: String,
+    pub available: bool,
+    pub windows: Vec<DesktopWindow>,
+}
+
+impl WindowList {
+    pub fn from_config(config: &DesktopConfig) -> Self {
+        if !config.enabled || !config.probe_display() {
+            return Self {
+                display: config.display.clone(),
+                available: false,
+                windows: Vec::new(),
+            };
+        }
+        Self {
+            display: config.display.clone(),
+            available: true,
+            windows: list_windows(&config.display),
+        }
+    }
+}
+
+/// `wmctrl -lx` on `DISPLAY`. Empty if wmctrl is missing.
+pub fn list_windows(display: &str) -> Vec<DesktopWindow> {
+    let out = Command::new("wmctrl")
+        .env("DISPLAY", display)
+        .arg("-lx")
+        .output();
+    match out {
+        Ok(o) if o.status.success() => parse_wmctrl_lx(&String::from_utf8_lossy(&o.stdout)),
+        _ => Vec::new(),
+    }
+}
+
+pub fn parse_wmctrl_lx(stdout: &str) -> Vec<DesktopWindow> {
+    stdout.lines().filter_map(parse_wmctrl_lx_line).collect()
+}
+
+pub fn parse_wmctrl_lx_line(line: &str) -> Option<DesktopWindow> {
+    let mut parts = line.split_whitespace();
+    let id = parts.next()?.to_string();
+    let desktop = parts.next()?.parse().unwrap_or(-1);
+    let class = parts.next()?.to_string();
+    let _host = parts.next()?;
+    let title = parts.collect::<Vec<_>>().join(" ");
+    if id.is_empty() {
+        return None;
+    }
+    Some(DesktopWindow {
+        id,
+        desktop,
+        class,
+        title,
+    })
 }
 
 pub fn probe_display(config: &DesktopConfig) -> bool {
@@ -174,20 +248,6 @@ fn x11_socket_path(display: &str) -> PathBuf {
     Path::new("/tmp/.X11-unix").join(format!("X{num}"))
 }
 
-fn env_nonempty(var: &str) -> Option<String> {
-    env::var(var).ok().filter(|s| !s.is_empty())
-}
-
-fn env_bool(var: &str, default: bool) -> bool {
-    match env::var(var) {
-        Ok(raw) => {
-            let v = raw.trim().to_ascii_lowercase();
-            !matches!(v.as_str(), "0" | "false" | "off" | "no")
-        }
-        Err(_) => default,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,6 +266,8 @@ mod tests {
         assert!(!cfg.probe_display());
         let status = DesktopStatus::from_config(&cfg, "127.0.0.1:1340");
         assert!(!status.available);
+        assert!(!status.enabled);
+        assert!(!status.ready);
         assert_eq!(status.viewer.port, 6080);
         assert_eq!(status.viewer.path, "/vnc.html");
         assert_eq!(status.viewer.url, "http://127.0.0.1:6080/vnc.html");
@@ -228,18 +290,12 @@ mod tests {
     }
 
     #[test]
-    fn env_bool_false_values() {
-        assert!(matches!("0".to_string(), _));
-        for v in ["0", "false", "OFF", "no"] {
-            std::env::set_var("BOX_DESKTOP_TEST_BOOL", v);
-            // inline parse
-            let parsed = {
-                let raw = std::env::var("BOX_DESKTOP_TEST_BOOL").unwrap();
-                let v = raw.trim().to_ascii_lowercase();
-                !matches!(v.as_str(), "0" | "false" | "off" | "no")
-            };
-            assert!(!parsed, "{v} should be false");
-        }
-        std::env::remove_var("BOX_DESKTOP_TEST_BOOL");
+    fn parses_wmctrl_line() {
+        let win = parse_wmctrl_lx_line("0x02a00003  0 chromium.Chromium  box  New Tab - Chromium")
+            .unwrap();
+        assert_eq!(win.id, "0x02a00003");
+        assert_eq!(win.desktop, 0);
+        assert_eq!(win.class, "chromium.Chromium");
+        assert_eq!(win.title, "New Tab - Chromium");
     }
 }

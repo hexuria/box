@@ -59,6 +59,7 @@ out="$(curl -fsS \
   http://127.0.0.1:1337/v1/exec)"
 echo "${out}"
 echo "${out}" | grep -q '"exit_code":0'
+echo "${out}" | grep -q '"exec_id"'
 echo "${out}" | grep -q ok
 
 code="$(curl -s -o /dev/null -w '%{http_code}' \
@@ -85,5 +86,32 @@ curl -fsS -H "Authorization: Bearer ${TOKEN}" http://127.0.0.1:1340/v1/ready \
 
 curl -fsS -H "Authorization: Bearer ${TOKEN}" http://127.0.0.1:1340/v1/info \
   | grep -q '"scope":"container-local"'
+
+info="$(curl -fsS -H "Authorization: Bearer ${TOKEN}" http://127.0.0.1:1340/v1/info)"
+if command -v python3 >/dev/null 2>&1; then
+  printf '%s' "${info}" | python3 -c '
+import json, sys
+c = json.load(sys.stdin)["capabilities"]
+for name in ("exec", "files", "desktop", "chrome", "cua"):
+    assert "enabled" in c[name] and "ready" in c[name], name
+'
+fi
+
+rid="$(curl -sS -D - -o /dev/null -H "x-request-id: native-smoke" http://127.0.0.1:1337/v1/health)"
+echo "${rid}" | grep -qi 'x-request-id: native-smoke'
+
+busy="$(curl -fsS -H "Authorization: Bearer ${TOKEN}" http://127.0.0.1:1337/v1/busy)"
+echo "${busy}"
+echo "${busy}" | grep -q '"max"'
+
+stream="$(curl -fsS \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/x-ndjson" \
+  -d '{"command":["echo","stream"]}' \
+  http://127.0.0.1:1337/v1/exec/stream)"
+echo "${stream}"
+echo "${stream}" | grep -q stream
+echo "${stream}" | grep -q '"type":"exit"'
 
 echo "NATIVE SMOKE OK"

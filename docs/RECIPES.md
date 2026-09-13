@@ -42,7 +42,7 @@ There was **no** preceding batch/recipe endpoint on this guest. Single-op CUA (i
 }
 ```
 
-The guest **lints the whole plan first** (empty, >256 steps, out-of-range coordinates, bad keys). If lint fails, **nothing** moves. Then it runs in order. Default screenshot is `end` (one PNG on the receipt, and a file under `artifact_dir` when that field is set). `none` skips it. `each` attaches a PNG after every non-wait step (heavy). `settle: "raw"` waits until Chromium is mapped and the title/URL changes after Return; `compressed` uses shorter timeouts so v2/v3 stay faster. Teach `wait` steps are always honored.
+The guest **lints the whole plan first** (empty, >256 steps, out-of-range coordinates, bad keys). If lint fails, **nothing** moves. Then it runs in order. Default screenshot is `end` (one PNG on the receipt, and a file under `artifact_dir` when that field is set). `none` skips it. `each` attaches a PNG after every non-wait step (heavy). `settle: "raw"` waits until Chromium is mapped and the title/URL changes after Return; `compressed` uses shorter timeouts. Default is **`off`** (no extra Chromium waits and no launch/close side effects). Teach `wait` steps are always honored.
 
 `record: true` starts ffmpeg/x11grab on the same X display **before the first CUA step** (before `warmup_pointer`) and sends SIGINT after the last step so the MP4 is finalized. There is no `-t` duration cap (that is what made tapes stop at 1s). Live capture is fragmented so SIGINT can finish the file; a second pass remuxes to progressive `+faststart`. Finder, QuickTime, and Chrome play `frag_keyframe+empty_moov` x264 as a still (Play does not change pixels). Exact commands:
 
@@ -60,7 +60,7 @@ ffmpeg -nostdin -hide_banner -loglevel error -y \
   /workspace/.l1/cooks/<run>/cook.faststart.mp4
 ```
 
-The video is a guest file (`cook.mp4`), not a new VNC session. `reset_desktop` (alias `reset`) closes Chromium, Terminal, Files, and leftover jobs via wmctrl — **same box id**, no Docker restart.
+The video is a guest file (`cook.mp4`), not a new VNC session. `reset_desktop` (alias `reset`) closes non-Chromium guest windows — **same box id**, no Docker restart. Chromium stays with the entrypoint (killing it would fight the respawn loop).
 
 Wait is capped at 10s per step. `stop_on_error` defaults true; earlier steps stay in the receipt (`ok: false`, `stopped_at`).
 

@@ -49,6 +49,7 @@ COPY docker/websockify-nodelay.py /usr/local/bin/websockify-nodelay
 COPY docker/box-reset-desktop.sh /usr/local/bin/box-reset-desktop
 COPY docker/chromium-policies.json /etc/chromium/policies/managed/grok-box.json
 COPY docker/chromium-policies.json /etc/opt/chrome/policies/managed/grok-box.json
+# chromium-launch.sh is intentionally not installed. Entrypoint owns Chromium.
 RUN chmod 755 /usr/local/bin/entrypoint.sh /usr/local/bin/websockify-nodelay /usr/local/bin/box-exec /usr/local/bin/box-host \
         /usr/local/bin/box-reset-desktop
 

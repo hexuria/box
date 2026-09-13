@@ -152,32 +152,6 @@ async fn window_viewable(display: &str, id: &str) -> bool {
     }
 }
 
-async fn launch_chromium(config: &CuaConfig) {
-    tracing::info!(display = %config.display, "chromium missing after dock click; raise-or-launch");
-    // setsid so the browser is not kill-on-drop when this Child is dropped.
-    let _ = Command::new("setsid")
-        .arg("box-chromium")
-        .arg("--raise-or-launch")
-        .env("DISPLAY", &config.display)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(false)
-        .spawn();
-}
-
-pub(crate) async fn close_chromium_windows(config: &CuaConfig) {
-    for win in wmctrl_lx(&config.display).await {
-        if win.is_chromium() {
-            let _ = Command::new("wmctrl")
-                .env("DISPLAY", config.display.as_str())
-                .args(["-ic", &win.id])
-                .status()
-                .await;
-        }
-    }
-}
-
 async fn cdp_json() -> Option<String> {
     let port: u16 = std::env::var("BOX_CDP_PORT")
         .ok()
@@ -251,13 +225,10 @@ fn page_changed(before: &PageSnap, now: &PageSnap) -> bool {
     page_ready(now) && !page_ready(before)
 }
 
-/// How long to let tint2 process a dock click before we launch ourselves.
-const LAUNCH_FALLBACK_MS: u64 = 800;
-
+/// Wait for an existing Chromium window. Never launches `box-chromium`.
 pub(crate) async fn wait_chromium_usable(config: &CuaConfig, timeout_ms: u64) -> bool {
     let started = Instant::now();
     let deadline = started + Duration::from_millis(timeout_ms);
-    let mut launched = false;
     loop {
         let wins = wmctrl_lx(&config.display).await;
         let chromes: Vec<&WinInfo> = wins.iter().filter(|w| w.is_chromium()).collect();
@@ -274,13 +245,6 @@ pub(crate) async fn wait_chromium_usable(config: &CuaConfig, timeout_ms: u64) ->
         if visible_usable {
             tokio::time::sleep(Duration::from_millis(250)).await;
             return true;
-        }
-        if chromes.is_empty()
-            && !launched
-            && started.elapsed() >= Duration::from_millis(LAUNCH_FALLBACK_MS)
-        {
-            launch_chromium(config).await;
-            launched = true;
         }
         if Instant::now() >= deadline {
             if let Some(win) = wins.iter().find(|w| w.is_app()) {

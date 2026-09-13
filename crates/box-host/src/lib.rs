@@ -6,23 +6,26 @@
 //! mimalloc feature as `box-exec`.
 
 use std::net::SocketAddr;
-use std::time::Duration;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::extract::{Request, State};
 use axum::middleware::{self, Next};
 use axum::response::Response;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use box_chrome::{probe_chrome, ChromeConfig, ChromeStatus};
 use box_common::{
-    bearer_token, container_local_host, container_local_http_url, cors_layer, tokens_equal,
-    ApiError, BoxConfig, GLOBAL_ALLOCATOR, PROTOCOL_VERSION,
+    bearer_token, container_local_host, container_local_http_url, cors_layer, echo_request_id,
+    tokens_equal, ApiError, BoxConfig, GLOBAL_ALLOCATOR, PROTOCOL_VERSION,
 };
 use box_cua::CuaConfig;
-use box_desktop::{DesktopConfig, DesktopStatus};
+use box_desktop::{DesktopConfig, DesktopStatus, WindowList};
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Notify;
 use tower_http::trace::TraceLayer;
 
 #[derive(Clone, Debug)]
@@ -36,6 +39,9 @@ pub struct AppState {
     pub desktop: DesktopConfig,
     pub chrome: ChromeConfig,
     pub cua: CuaConfig,
+    pub shutdown: Arc<Notify>,
+    pub shutting_down: Arc<AtomicBool>,
+    pub started_at: Instant,
 }
 
 impl AppState {
@@ -50,6 +56,9 @@ impl AppState {
             desktop: DesktopConfig::from_env(),
             chrome: ChromeConfig::from_env(),
             cua: CuaConfig::from_env(),
+            shutdown: Arc::new(Notify::new()),
+            shutting_down: Arc::new(AtomicBool::new(false)),
+            started_at: Instant::now(),
         }
     }
 }
@@ -86,12 +95,18 @@ struct VersionInfo {
 }
 
 #[derive(Serialize)]
+struct Capability {
+    enabled: bool,
+    ready: bool,
+}
+
+#[derive(Serialize)]
 struct Capabilities {
-    exec: bool,
-    files: bool,
-    desktop: bool,
-    chrome: bool,
-    cua: bool,
+    exec: Capability,
+    files: Capability,
+    desktop: Capability,
+    chrome: Capability,
+    cua: Capability,
 }
 
 #[derive(Serialize)]
@@ -107,12 +122,17 @@ pub fn app(state: AppState) -> Router {
         .route("/v1/ready", get(ready))
         .route("/v1/info", get(info))
         .route("/v1/desktop", get(desktop))
+        .route("/v1/desktop/windows", get(windows))
         .route("/v1/chrome", get(chrome))
+        .route("/v1/busy", get(busy))
+        .route("/v1/shutdown", post(shutdown))
+        .route("/v1/metrics", get(metrics))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
 
     Router::new()
         .route("/v1/health", get(health))
         .merge(protected)
+        .layer(middleware::from_fn(echo_request_id))
         .with_state(state)
 }
 
@@ -124,7 +144,9 @@ pub fn router(state: AppState) -> Router {
 
 pub async fn serve(config: BoxConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let bind = config.host_bind;
-    let app = router(AppState::from_config(&config));
+    let state = AppState::from_config(&config);
+    let shutdown = state.shutdown.clone();
+    let app = router(state);
     tracing::info!(
         %bind,
         box_id = %config.box_id,
@@ -133,7 +155,7 @@ pub async fn serve(config: BoxConfig) -> Result<(), Box<dyn std::error::Error + 
     );
     let listener = TcpListener::bind(bind).await?;
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal(shutdown))
         .await?;
     Ok(())
 }
@@ -178,11 +200,29 @@ async fn info(State(state): State<AppState>) -> Json<InfoResponse> {
             protocol: PROTOCOL_VERSION,
         },
         capabilities: Capabilities {
-            exec: true,
-            files: true,
-            desktop: state.desktop.probe_display(),
-            chrome: probe_chrome(&state.chrome).running,
-            cua: state.cua.capability_ready(),
+            exec: Capability {
+                enabled: true,
+                ready: true,
+            },
+            files: Capability {
+                enabled: true,
+                ready: true,
+            },
+            desktop: Capability {
+                enabled: state.desktop.enabled,
+                ready: state.desktop.probe_display(),
+            },
+            chrome: {
+                let st = probe_chrome(&state.chrome);
+                Capability {
+                    enabled: st.enabled,
+                    ready: st.ready,
+                }
+            },
+            cua: Capability {
+                enabled: state.cua.enabled,
+                ready: state.cua.capability_ready(),
+            },
         },
         endpoints: Endpoints {
             exec: container_local_http_url(state.exec_bind),
@@ -200,6 +240,70 @@ async fn desktop(State(state): State<AppState>) -> Json<DesktopStatus> {
 
 async fn chrome(State(state): State<AppState>) -> Json<ChromeStatus> {
     Json(probe_chrome(&state.chrome))
+}
+
+async fn windows(State(state): State<AppState>) -> Json<WindowList> {
+    Json(WindowList::from_config(&state.desktop))
+}
+
+#[derive(Serialize)]
+struct HostBusy {
+    busy: bool,
+    shutting_down: bool,
+    exec_ready: bool,
+    desktop_ready: bool,
+    chrome_ready: bool,
+}
+
+#[derive(Serialize)]
+struct HostShutdown {
+    ok: bool,
+    service: &'static str,
+}
+
+#[derive(Serialize)]
+struct HostMetrics {
+    service: &'static str,
+    uptime_ms: u64,
+    desktop_ready: bool,
+    chrome_ready: bool,
+}
+
+async fn busy(State(state): State<AppState>) -> Json<HostBusy> {
+    let chrome = probe_chrome(&state.chrome);
+    Json(HostBusy {
+        busy: false,
+        shutting_down: state
+            .shutting_down
+            .load(std::sync::atomic::Ordering::Relaxed),
+        exec_ready: probe_exec_health(&state.exec_url).await,
+        desktop_ready: state.desktop.probe_display(),
+        chrome_ready: chrome.ready,
+    })
+}
+
+async fn shutdown(State(state): State<AppState>) -> Json<HostShutdown> {
+    state
+        .shutting_down
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let notify = state.shutdown.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        notify.notify_waiters();
+    });
+    Json(HostShutdown {
+        ok: true,
+        service: "box-host",
+    })
+}
+
+async fn metrics(State(state): State<AppState>) -> Json<HostMetrics> {
+    Json(HostMetrics {
+        service: "box-host",
+        uptime_ms: state.started_at.elapsed().as_millis() as u64,
+        desktop_ready: state.desktop.probe_display(),
+        chrome_ready: probe_chrome(&state.chrome).ready,
+    })
 }
 
 async fn require_token(
@@ -248,7 +352,7 @@ fn host_port_from_url(url: &str) -> Option<String> {
     }
 }
 
-async fn shutdown_signal() {
+async fn shutdown_signal(notify: Arc<Notify>) {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
     };
@@ -265,6 +369,7 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => {}
         _ = terminate => {}
+        _ = notify.notified() => {}
     }
 }
 
@@ -288,6 +393,9 @@ mod tests {
             desktop: DesktopConfig::disabled(),
             chrome: ChromeConfig::disabled(),
             cua: CuaConfig::disabled(),
+            shutdown: Arc::new(Notify::new()),
+            shutting_down: Arc::new(AtomicBool::new(false)),
+            started_at: Instant::now(),
         }
     }
 
@@ -388,11 +496,15 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["box_id"], "test-box");
-        assert_eq!(body["capabilities"]["exec"], true);
-        assert_eq!(body["capabilities"]["files"], true);
-        assert_eq!(body["capabilities"]["desktop"], false);
-        assert_eq!(body["capabilities"]["chrome"], false);
-        assert_eq!(body["capabilities"]["cua"], false);
+        assert_eq!(body["capabilities"]["exec"]["enabled"], true);
+        assert_eq!(body["capabilities"]["exec"]["ready"], true);
+        assert_eq!(body["capabilities"]["files"]["enabled"], true);
+        assert_eq!(body["capabilities"]["desktop"]["enabled"], false);
+        assert_eq!(body["capabilities"]["desktop"]["ready"], false);
+        assert_eq!(body["capabilities"]["chrome"]["enabled"], false);
+        assert_eq!(body["capabilities"]["chrome"]["ready"], false);
+        assert_eq!(body["capabilities"]["cua"]["enabled"], false);
+        assert_eq!(body["capabilities"]["cua"]["ready"], false);
         assert_eq!(body["endpoints"]["exec"], "http://127.0.0.1:1337");
         assert_eq!(body["endpoints"]["host"], "http://127.0.0.1:1340");
         assert_eq!(body["endpoints"]["scope"], "container-local");
@@ -411,6 +523,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["enabled"], false);
         assert_eq!(body["running"], false);
+        assert_eq!(body["ready"], false);
         assert!(body["cdp"].is_null());
     }
 
@@ -439,6 +552,8 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["available"], false);
+        assert_eq!(body["enabled"], false);
+        assert_eq!(body["ready"], false);
         assert_eq!(body["display"], ":1");
         assert_eq!(body["viewer"]["port"], 6080);
         assert_eq!(body["viewer"]["path"], "/vnc.html");

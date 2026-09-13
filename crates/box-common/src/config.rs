@@ -23,6 +23,12 @@ pub struct BoxConfig {
     pub default_timeout: Duration,
     pub max_timeout: Duration,
     pub max_output_bytes: usize,
+    /// Max simultaneous `POST /v1/exec` (and stream/detach) children.
+    pub max_concurrent_execs: usize,
+    /// Max directory listing entries returned by `GET /v1/files`.
+    pub max_dir_entries: usize,
+    /// After exec timeout, wait this long after SIGTERM before SIGKILL.
+    pub kill_grace: Duration,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -33,9 +39,9 @@ impl BoxConfig {
     /// Load config from the environment, then drop bearer/VNC secrets from
     /// this process's environ so they are not visible in `/proc/self/environ`.
     pub fn from_env() -> Result<Self, ConfigError> {
-        let token = env_nonempty("BOX_TOKEN")
+        let token = crate::env_nonempty("BOX_TOKEN")
             .ok_or_else(|| ConfigError("BOX_TOKEN must be set and non-empty".into()))?;
-        let host_token = env_nonempty("BOX_HOST_TOKEN").unwrap_or_else(|| token.clone());
+        let host_token = crate::env_nonempty("BOX_HOST_TOKEN").unwrap_or_else(|| token.clone());
         let exec_bind = parse_addr("BOX_EXEC_BIND", "127.0.0.1:1337");
         let host_bind = parse_addr("BOX_HOST_BIND", "127.0.0.1:1340");
 
@@ -65,6 +71,11 @@ impl BoxConfig {
             default_timeout: Duration::from_millis(parse_u64("BOX_DEFAULT_TIMEOUT_MS", 30_000)),
             max_timeout: Duration::from_millis(parse_u64("BOX_MAX_TIMEOUT_MS", 10 * 60 * 1000)),
             max_output_bytes: parse_u64("BOX_MAX_OUTPUT_BYTES", 8 * 1024 * 1024) as usize,
+            max_concurrent_execs: parse_u64("BOX_MAX_CONCURRENT_EXECS", 8).clamp(1, 256) as usize,
+            max_dir_entries: parse_u64("BOX_MAX_DIR_ENTRIES", 4096).clamp(1, 100_000) as usize,
+            kill_grace: Duration::from_millis(
+                parse_u64("BOX_EXEC_KILL_GRACE_MS", 2_000).clamp(50, 30_000),
+            ),
         };
 
         wipe_secret_environ();
@@ -108,7 +119,7 @@ pub fn token_is_insecure(token: &str) -> bool {
 }
 
 fn allow_insecure_dev() -> bool {
-    env::var("BOX_ALLOW_INSECURE_DEV").ok().as_deref() == Some("1")
+    crate::env_bool("BOX_ALLOW_INSECURE_DEV", false)
 }
 
 fn binds_are_loopback(exec_bind: SocketAddr, host_bind: SocketAddr) -> bool {
@@ -117,10 +128,6 @@ fn binds_are_loopback(exec_bind: SocketAddr, host_bind: SocketAddr) -> bool {
 
 fn ip_is_loopback(ip: IpAddr) -> bool {
     ip.is_loopback()
-}
-
-fn env_nonempty(var: &str) -> Option<String> {
-    env::var(var).ok().filter(|s| !s.is_empty())
 }
 
 fn default_box_id() -> String {

@@ -8,6 +8,9 @@ info:
     CUA coordinate space is the X framebuffer 1280x800, origin top-left.
     SDKs connect with caller-supplied exec URL, host URL, and token; they ignore
     /v1/info advertised URLs (those are container-local listen addresses).
+    CUA coordinate bounds follow BOX_DISPLAY_GEOM (default 1280x800). Responses
+    echo x-request-id. Exec is HTTP-only on the guest; TLS belongs at a reverse
+    proxy. The Rust/TS/Python clients speak HTTP or HTTPS.
   version: 0.1.0
   license:
     name: MIT
@@ -34,6 +37,13 @@ components:
     bearer:
       type: http
       scheme: bearer
+  parameters:
+    RequestId:
+      in: header
+      name: x-request-id
+      required: false
+      schema: { type: string, maxLength: 128 }
+      description: Optional correlation id. Echoed on the response; minted if omitted.
   schemas:
     ErrorResponse:
       type: object
@@ -68,12 +78,28 @@ components:
           type: object
           additionalProperties: { type: string }
         stdin: { type: string, nullable: true }
+        detach: { type: boolean, default: false }
+        pty: { type: boolean, description: "Not implemented. Returns 400. Use /v1/exec/stream." }
     ExecResponse:
       type: object
       required: [stdout, stderr, timed_out, duration_ms, truncated, cwd]
       properties:
         stdout: { type: string }
         stderr: { type: string }
+        exit_code: { type: integer, nullable: true }
+        timed_out: { type: boolean }
+        duration_ms: { type: integer }
+        truncated: { type: boolean }
+        cwd: { type: string }
+        exec_id: { type: string }
+        detached: { type: boolean }
+        status: { type: string, nullable: true }
+    ExecStreamEvent:
+      type: object
+      properties:
+        type: { type: string, enum: [stdout, stderr, exit] }
+        data: { type: string }
+        exec_id: { type: string }
         exit_code: { type: integer, nullable: true }
         timed_out: { type: boolean }
         duration_ms: { type: integer }
@@ -103,6 +129,7 @@ components:
                   name: { type: string }
                   kind: { type: string }
                   size: { type: integer, nullable: true }
+            truncated: { type: boolean }
     FilePutRequest:
       type: object
       required: [path, content]
@@ -145,9 +172,11 @@ components:
         desktop_ready: { type: boolean }
     DesktopStatus:
       type: object
-      required: [available, display, geometry, vnc, viewer]
+      required: [enabled, ready, available, display, geometry, vnc, viewer]
       properties:
-        available: { type: boolean }
+        enabled: { type: boolean }
+        ready: { type: boolean }
+        available: { type: boolean, description: Same as ready (compat) }
         display: { type: string }
         geometry: { type: string }
         vnc: { type: string }
@@ -159,9 +188,10 @@ components:
             url: { type: string }
     ChromeStatus:
       type: object
-      required: [enabled, running, profile, display]
+      required: [enabled, ready, running, profile, display]
       properties:
         enabled: { type: boolean }
+        ready: { type: boolean, description: CDP GET /json/version succeeded }
         running: { type: boolean }
         profile: { type: string }
         cdp: { type: string, nullable: true }
@@ -193,6 +223,86 @@ components:
       required: [key]
       properties:
         key: { type: string, minLength: 1 }
+        action: { type: string, enum: [tap, down, up], default: tap }
+    PressRequest:
+      type: object
+      required: [x, y]
+      properties:
+        x: { type: integer }
+        y: { type: integer }
+        button: { type: integer, minimum: 1, maximum: 7, default: 1 }
+    ReleaseRequest:
+      type: object
+      properties:
+        x: { type: integer }
+        y: { type: integer }
+        button: { type: integer, minimum: 1, maximum: 7, default: 1 }
+        path:
+          type: array
+          maxItems: 64
+          items:
+            type: object
+            required: [x, y]
+            properties:
+              x: { type: integer }
+              y: { type: integer }
+    Busy:
+      type: object
+      properties:
+        busy: { type: boolean }
+        execs:
+          type: object
+          properties:
+            current: { type: integer }
+            max: { type: integer }
+        shutting_down: { type: boolean }
+        exec_ready: { type: boolean }
+        desktop_ready: { type: boolean }
+        chrome_ready: { type: boolean }
+    Metrics:
+      type: object
+      properties:
+        service: { type: string }
+        uptime_ms: { type: integer }
+        execs:
+          type: object
+          properties:
+            current: { type: integer }
+            max: { type: integer }
+            started: { type: integer }
+    WindowList:
+      type: object
+      required: [display, available, windows]
+      properties:
+        display: { type: string }
+        available: { type: boolean }
+        windows:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              desktop: { type: integer }
+              class: { type: string }
+              title: { type: string }
+    Shutdown:
+      type: object
+      required: [ok, service]
+      properties:
+        ok: { type: boolean }
+        service: { type: string }
+    RenameRequest:
+      type: object
+      required: [from, to]
+      properties:
+        from: { type: string }
+        to: { type: string }
+    RenameResponse:
+      type: object
+      required: [from, to]
+      properties:
+        from: { type: string }
+        to: { type: string }
     ScrollRequest:
       type: object
       required: [x, y, dx, dy]
@@ -228,17 +338,20 @@ components:
         name: { type: string }
         stop_on_error: { type: boolean, default: true }
         screenshot: { type: string, enum: [none, end, each], default: end }
+        record: { type: boolean, default: false }
+        artifact_dir: { type: string }
+        settle: { type: string, enum: [off, compressed, raw], default: off }
         steps:
           type: array
           minItems: 1
-          maxItems: 64
+          maxItems: 256
           items:
             type: object
             required: [op]
             properties:
               op:
                 type: string
-                enum: [click, double_click, double-click, move, drag, type, key, scroll, wait, screenshot]
+                enum: [click, double_click, double-click, move, drag, type, key, scroll, wait, screenshot, press, mousedown, release, mouseup, reset_desktop, reset]
     RecipeResponse:
       type: object
       required: [ok, ran, duration_ms, steps]
@@ -276,11 +389,31 @@ components:
         capabilities:
           type: object
           properties:
-            exec: { type: boolean }
-            files: { type: boolean }
-            desktop: { type: boolean }
-            chrome: { type: boolean }
-            cua: { type: boolean }
+            exec:
+              type: object
+              properties:
+                enabled: { type: boolean }
+                ready: { type: boolean }
+            files:
+              type: object
+              properties:
+                enabled: { type: boolean }
+                ready: { type: boolean }
+            desktop:
+              type: object
+              properties:
+                enabled: { type: boolean }
+                ready: { type: boolean }
+            chrome:
+              type: object
+              properties:
+                enabled: { type: boolean }
+                ready: { type: boolean }
+            cua:
+              type: object
+              properties:
+                enabled: { type: boolean }
+                ready: { type: boolean }
         endpoints:
           type: object
           properties:
@@ -348,6 +481,8 @@ paths:
       tags: [exec]
       summary: Run a command (box-exec only)
       security: [{ bearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/RequestId"
       requestBody:
         required: true
         content:
@@ -355,17 +490,45 @@ paths:
             schema: { $ref: "#/components/schemas/ExecRequest" }
       responses:
         "200":
-          description: Command finished or timed out
+          description: Command finished, timed out, or detached running receipt
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ExecResponse" }
         "400":
-          description: Invalid request or spawn failure
+          description: Invalid request, PTY requested, or spawn failure
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
         "401":
           description: Missing or wrong token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "429":
+          description: BOX_MAX_CONCURRENT_EXECS slots full
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /v1/exec/{id}:
+    get:
+      tags: [exec]
+      summary: Poll a detached exec (in-memory; not durable)
+      security: [{ bearer: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+        - $ref: "#/components/parameters/RequestId"
+      responses:
+        "200":
+          description: Detached job snapshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExecResponse" }
+        "404":
+          description: Unknown exec id
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
@@ -383,6 +546,7 @@ paths:
         - in: query
           name: encoding
           schema: { type: string, enum: [utf8, text, base64] }
+        - $ref: "#/components/parameters/RequestId"
       responses:
         "200":
           description: File or directory
@@ -408,6 +572,8 @@ paths:
       tags: [exec]
       summary: Write a file (box-exec only)
       security: [{ bearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/RequestId"
       requestBody:
         required: true
         content:
@@ -446,6 +612,7 @@ paths:
         - in: query
           name: recursive
           schema: { type: string, enum: ["true", "1"] }
+        - $ref: "#/components/parameters/RequestId"
       responses:
         "200":
           description: Deleted
@@ -781,3 +948,275 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /v1/exec/stream:
+    post:
+      tags: [exec]
+      summary: Stream exec stdout/stderr/exit as NDJSON (or SSE)
+      description: |
+        Same admission and timeout as POST /v1/exec. Default body is
+        application/x-ndjson lines. Send Accept: text/event-stream for SSE.
+        PTY is not implemented.
+      security: [{ bearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/RequestId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ExecRequest" }
+      responses:
+        "200":
+          description: Stream of stdout/stderr then an exit event
+          content:
+            application/x-ndjson:
+              schema: { $ref: "#/components/schemas/ExecStreamEvent" }
+            text/event-stream:
+              schema: { type: string }
+        "401":
+          description: Missing or wrong token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "429":
+          description: Busy
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /v1/files/raw:
+    get:
+      tags: [exec]
+      summary: Read a file as application/octet-stream
+      security: [{ bearer: [] }]
+      parameters:
+        - in: query
+          name: path
+          required: true
+          schema: { type: string }
+        - $ref: "#/components/parameters/RequestId"
+      responses:
+        "200":
+          description: Raw bytes
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "400":
+          description: Path escape or directory
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401":
+          description: Missing or wrong token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+    put:
+      tags: [exec]
+      summary: Write a file from an octet-stream body
+      security: [{ bearer: [] }]
+      parameters:
+        - in: query
+          name: path
+          required: true
+          schema: { type: string }
+        - in: query
+          name: create_dirs
+          schema: { type: string }
+        - $ref: "#/components/parameters/RequestId"
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "200":
+          description: Written
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FilePutResponse" }
+
+  /v1/files/rename:
+    post:
+      tags: [exec]
+      summary: Rename a file or directory (box-exec only)
+      security: [{ bearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RenameRequest" }
+      responses:
+        "200":
+          description: Renamed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RenameResponse" }
+        "400":
+          description: Path escape or destination exists
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401":
+          description: Missing or wrong token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: Source not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /v1/busy:
+    get:
+      tags: [exec, host]
+      summary: Exec slots (box-exec) or readiness flags (box-host)
+      security: [{ bearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/RequestId"
+      responses:
+        "200":
+          description: Busy snapshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Busy" }
+        "401":
+          description: Missing or wrong token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /v1/shutdown:
+    post:
+      tags: [exec, host]
+      summary: Graceful process shutdown after the response is sent
+      security: [{ bearer: [] }]
+      responses:
+        "200":
+          description: Shutdown scheduled
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Shutdown" }
+
+  /v1/metrics:
+    get:
+      tags: [exec, host]
+      summary: Lightweight process metrics (not Prometheus)
+      security: [{ bearer: [] }]
+      responses:
+        "200":
+          description: Counters
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Metrics" }
+
+  /v1/desktop/windows:
+    get:
+      tags: [desktop, host]
+      summary: wmctrl window list for the guest display
+      security: [{ bearer: [] }]
+      responses:
+        "200":
+          description: Windows
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WindowList" }
+        "401":
+          description: Missing or wrong token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /v1/cua/press:
+    post:
+      tags: [cua]
+      summary: mousemove + mousedown (no mouseup)
+      security: [{ bearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PressRequest" }
+      responses:
+        "200":
+          description: Pressed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CuaOk" }
+        "400":
+          description: Out of range
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401":
+          description: Missing or wrong token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /v1/cua/mousedown:
+    post:
+      tags: [cua]
+      summary: Alias for /v1/cua/press
+      security: [{ bearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PressRequest" }
+      responses:
+        "200":
+          description: Pressed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CuaOk" }
+
+  /v1/cua/release:
+    post:
+      tags: [cua]
+      summary: Optional motion path then mouseup
+      security: [{ bearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReleaseRequest" }
+      responses:
+        "200":
+          description: Released
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CuaOk" }
+        "400":
+          description: Out of range or x/y mismatch
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401":
+          description: Missing or wrong token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /v1/cua/mouseup:
+    post:
+      tags: [cua]
+      summary: Alias for /v1/cua/release
+      security: [{ bearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReleaseRequest" }
+      responses:
+        "200":
+          description: Released
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CuaOk" }

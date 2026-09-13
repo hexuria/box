@@ -68,9 +68,21 @@ Run a process. `cwd` defaults to the workspace root and is jail-checked.
 }
 ```
 
-On timeout: `timed_out: true`, `exit_code: null`, process group is killed. **Captured stdout/stderr are kept.** Output streams are capped (`BOX_MAX_OUTPUT_BYTES`, default 8 MiB); `truncated` is true if a cap hit. After writing `stdin`, the pipe is closed so the child sees EOF. `BOX_TOKEN`, `BOX_HOST_TOKEN`, and `BOX_VNC_PASSWORD` are stripped from the child environment. The daemons also drop those variables from their own process environ after loading config.
+On timeout: `timed_out: true`; the process group gets **SIGTERM**, then **SIGKILL** after `BOX_EXEC_KILL_GRACE_MS` (default 2s). `exit_code` is the wait status if the child dies on SIGTERM (often 143) or `null` if SIGKILL was required. **Captured stdout/stderr are kept.** Output streams are capped (`BOX_MAX_OUTPUT_BYTES`, default 8 MiB); `truncated` is true if a cap hit. After writing `stdin`, the pipe is closed so the child sees EOF. `BOX_TOKEN`, `BOX_HOST_TOKEN`, and `BOX_VNC_PASSWORD` are stripped from the child environment. The daemons also drop those variables from their own process environ after loading config.
 
-Default timeout 30s; max 10 minutes (`BOX_DEFAULT_TIMEOUT_MS`, `BOX_MAX_TIMEOUT_MS`).
+Default timeout 30s; max 10 minutes (`BOX_DEFAULT_TIMEOUT_MS`, `BOX_MAX_TIMEOUT_MS`). Concurrent execs are capped (`BOX_MAX_CONCURRENT_EXECS`, default **8**); extra calls return **429** `busy`. On timeout the process group gets **SIGTERM**, then **SIGKILL** after `BOX_EXEC_KILL_GRACE_MS` (default 2s). Responses include `exec_id`.
+
+`pty: true` is **not implemented** (400). Use `POST /v1/exec/stream` for incremental stdout/stderr.
+
+### `POST /v1/exec/stream`
+
+Same body as `/v1/exec`. Response is `application/x-ndjson` (or SSE if `Accept: text/event-stream`): `stdout` / `stderr` chunks, then `{ "type": "exit", ... }`.
+
+Optional `detach: true` on `/v1/exec` returns immediately with `status: "running"`; poll `GET /v1/exec/{id}`.
+
+### `GET /v1/busy` / `GET /v1/metrics` / `POST /v1/shutdown`
+
+Exec slots and a lightweight uptime/counters snapshot. `POST /v1/shutdown` schedules a graceful process exit (also on box-host).
 
 ### `GET /v1/files?path=&encoding=`
 
@@ -98,7 +110,9 @@ Directory:
 }
 ```
 
-`encoding=utf8` (default) or `base64`. Invalid UTF-8 files are returned as `base64`.
+`encoding=utf8` (default) or `base64`. Invalid UTF-8 files are returned as `base64`. Directory listings include `truncated` when `BOX_MAX_DIR_ENTRIES` (default 4096) is hit.
+
+Raw bytes: `GET` / `PUT /v1/files/raw?path=` with `application/octet-stream`.
 
 ### `PUT /v1/files`
 
@@ -267,7 +281,7 @@ Many CUA steps in **one** request. The guest lints the plan (empty, too many ste
 }
 ```
 
-`200` is a receipt (`ok`, `ran`, `stopped_at`, `duration_ms`, `steps[]`, optional `screenshot`, `artifacts[]`). When `artifact_dir` is set, PNG/video are workspace files (`path` on the receipt) so a client can fetch them without inline base64. `record: true` starts x11grab **before the first CUA step** and SIGINT-stops after the last (no `-t`), then remuxes the tape to progressive `+faststart` MP4. `reset_desktop` closes guest windows on this X session. A step failure with `stop_on_error: true` is still **200** with `ok: false`. Max 256 steps. Wait max 10s per step. Optional `settle` is `raw` (v1: longer Chromium/page waits), `compressed` (v2/v3 default), or `off`. Keys and typed characters are paced so Chromium can map them. Combined chords are one step (`{ "op": "key", "key": "ctrl+l" }`), not ctrl/l down/up.
+`200` is a receipt (`ok`, `ran`, `stopped_at`, `duration_ms`, `steps[]`, optional `screenshot`, `artifacts[]`). When `artifact_dir` is set, PNG/video are workspace files (`path` on the receipt) so a client can fetch them without inline base64. `record: true` starts x11grab **before the first CUA step** and SIGINT-stops after the last (no `-t`), then remuxes the tape to progressive `+faststart` MP4. `reset_desktop` closes guest windows on this X session. A step failure with `stop_on_error: true` is still **200** with `ok: false`. Max 256 steps. Wait max 10s per step. Optional `settle` is `off` (default: no extra Chromium/page waits, no launch/close side effects), `compressed`, or `raw`. Keys and typed characters are paced so Chromium can map them. Combined chords are one step (`{ "op": "key", "key": "ctrl+l" }`), not ctrl/l down/up.
 
 ---
 
@@ -302,11 +316,11 @@ Uses `BOX_HOST_TOKEN` if set, else `BOX_TOKEN`.
     "protocol": "v1"
   },
   "capabilities": {
-    "exec": true,
-    "files": true,
-    "desktop": true,
-    "chrome": true,
-    "cua": true
+    "exec": { "enabled": true, "ready": true },
+    "files": { "enabled": true, "ready": true },
+    "desktop": { "enabled": true, "ready": true },
+    "chrome": { "enabled": true, "ready": true },
+    "cua": { "enabled": true, "ready": true }
   },
   "endpoints": {
     "exec": "http://127.0.0.1:1337",
@@ -323,6 +337,8 @@ Uses `BOX_HOST_TOKEN` if set, else `BOX_TOKEN`.
 
 ```json
 {
+  "enabled": true,
+  "ready": true,
   "available": true,
   "display": ":1",
   "geometry": "1280x800x24",
@@ -342,6 +358,7 @@ Connect to `viewer.url` through a tunnel or loopback publish. VNC password is `B
 ```json
 {
   "enabled": true,
+  "ready": true,
   "running": true,
   "profile": "/home/box/chrome-profile",
   "cdp": "127.0.0.1:9222",
@@ -349,4 +366,10 @@ Connect to `viewer.url` through a tunnel or loopback publish. VNC password is `B
 }
 ```
 
-CDP is loopback-only. Agents inside the box may attach; do not publish 9222.
+CDP is loopback-only. `ready` means Chromium answered `GET /json/version` on that port (not a `/proc` scrape). Agents inside the box may attach; do not publish 9222.
+
+### `GET /v1/desktop/windows` (bearer)
+
+`wmctrl -lx` on the guest display (`id`, `desktop`, `class`, `title`). Empty if desktop is down.
+
+Responses echo `x-request-id` (honored if sent, otherwise minted).

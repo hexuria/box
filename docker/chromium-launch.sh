@@ -1,4 +1,12 @@
 #!/bin/bash
+# NOT installed in the guest image.
+#
+# The product Chromium is started by docker/entrypoint.sh (respawn loop, CDP on
+# loopback). This script is a leftover dock-toggle launcher used by older demo
+# recipes. box-exec / recipes must not call `box-chromium`. Do not COPY this
+# file into the image unless you are deliberately replacing the entrypoint
+# model.
+#
 # Launch Chromium as a normal desktop app (no kiosk, no respawn).
 #
 # Chromium itself adds --disable-setuid-sandbox whenever --no-sandbox is set,

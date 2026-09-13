@@ -44,7 +44,12 @@ CORS is not permissive. Server-to-server callers are unaffected. Browsers only g
 3. Strip `BOX_TOKEN`, `BOX_HOST_TOKEN`, and `BOX_VNC_PASSWORD` from the child (including caller-supplied `env`). The daemons also drop those names from their own environ after config load.
 4. Write `stdin` if provided, then close the pipe so the child sees EOF.
 5. Cap stdout/stderr (`BOX_MAX_OUTPUT_BYTES`).
-6. On timeout: kill the process group, **keep** whatever output was captured, `timed_out: true`, `exit_code: null`.
+6. On timeout: **SIGTERM** the process group, wait `BOX_EXEC_KILL_GRACE_MS` (default 2s), then **SIGKILL**. Keep captured output. `timed_out: true`. Response includes `exec_id`.
+7. Concurrent children are limited (`BOX_MAX_CONCURRENT_EXECS`, default 8). Overflow is **429** `busy`.
+
+`POST /v1/exec/stream` is the incremental path (NDJSON or SSE). PTY is not implemented. Optional `detach: true` plus `GET /v1/exec/{id}` for fire-and-forget.
+
+Every response echoes `x-request-id`.
 
 ## Files
 

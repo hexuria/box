@@ -38,7 +38,7 @@ mod tests {
         assert_eq!(GLOBAL_ALLOCATOR, "mimalloc");
         #[cfg(not(feature = "mimalloc"))]
         assert_eq!(GLOBAL_ALLOCATOR, "system");
-        let v = vec![1u8, 2, 3];
+        let v = [1u8, 2, 3];
         assert_eq!(v.len(), 3);
     }
 }

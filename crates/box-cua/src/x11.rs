@@ -31,6 +31,7 @@ struct InputState {
     backend: Backend,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum Backend {
     Native(InputConn),
     /// XTEST unavailable; callers use xdotool.

@@ -61,6 +61,7 @@ class GrokBox:
         timeout_ms: int | None = None,
         env: Mapping[str, str] | None = None,
         stdin: str | None = None,
+        detach: bool | None = None,
     ) -> Any:
         body: dict[str, Any] = {"command": command}
         if cwd is not None:
@@ -71,7 +72,12 @@ class GrokBox:
             body["env"] = dict(env)
         if stdin is not None:
             body["stdin"] = stdin
+        if detach is not None:
+            body["detach"] = detach
         return self._auth("POST", f"{self.exec_url}/v1/exec", body)
+
+    def exec_status(self, exec_id: str) -> Any:
+        return self._auth("GET", f"{self.exec_url}/v1/exec/{exec_id}")
 
     def files_get(self, path: str, encoding: str | None = None) -> Any:
         query = {"path": path}
@@ -107,6 +113,78 @@ class GrokBox:
             f"{self.exec_url}/v1/files/mkdir",
             {"path": path, "parents": parents},
         )
+
+    def files_rename(self, frm: str, to: str) -> Any:
+        return self._auth("POST", f"{self.exec_url}/v1/files/rename", {"from": frm, "to": to})
+
+    def files_get_raw(self, path: str) -> bytes:
+        response = self._http.get(
+            f"{self.exec_url}/v1/files/raw",
+            params={"path": path},
+            headers={
+                "authorization": f"Bearer {self.token}",
+                "accept": "application/octet-stream",
+                "x-request-id": self._request_id(),
+            },
+        )
+        if response.status_code >= 400:
+            raise GrokBoxError(
+                f"raw GET returned {response.status_code}",
+                response.status_code,
+                self._body(response),
+            )
+        return response.content
+
+    def files_put_raw(self, path: str, content: bytes) -> Any:
+        response = self._http.put(
+            f"{self.exec_url}/v1/files/raw",
+            params={"path": path},
+            headers={
+                "authorization": f"Bearer {self.token}",
+                "content-type": "application/octet-stream",
+                "x-request-id": self._request_id(),
+            },
+            content=content,
+        )
+        return self._decode(response, f"{self.exec_url}/v1/files/raw")
+
+    def desktop(self) -> Any:
+        return self._auth("GET", f"{self.host_url}/v1/desktop")
+
+    def chrome(self) -> Any:
+        return self._auth("GET", f"{self.host_url}/v1/chrome")
+
+    def windows(self) -> Any:
+        return self._auth("GET", f"{self.host_url}/v1/desktop/windows")
+
+    def busy(self) -> Any:
+        return self._auth("GET", f"{self.exec_url}/v1/busy")
+
+    def metrics(self) -> Any:
+        return self._auth("GET", f"{self.exec_url}/v1/metrics")
+
+    def shutdown(self, host: bool = False) -> Any:
+        base = self.host_url if host else self.exec_url
+        return self._auth("POST", f"{base}/v1/shutdown")
+
+    def exec_stream(self, command: list[str] | str, **kwargs: Any) -> str:
+        body: dict[str, Any] = {"command": command, **kwargs}
+        response = self._http.post(
+            f"{self.exec_url}/v1/exec/stream",
+            headers={
+                "authorization": f"Bearer {self.token}",
+                "accept": "application/x-ndjson",
+                "x-request-id": self._request_id(),
+            },
+            json=body,
+        )
+        if response.status_code >= 400:
+            raise GrokBoxError(
+                f"exec stream returned {response.status_code}",
+                response.status_code,
+                self._body(response),
+            )
+        return response.text
 
     def screenshot(self) -> Any:
         return self._auth("POST", f"{self.exec_url}/v1/cua/screenshot")
@@ -160,6 +238,22 @@ class GrokBox:
             {"x1": x1, "y1": y1, "x2": x2, "y2": y2, "button": button},
         )
 
+    def press(self, x: int, y: int, button: int | None = None) -> Any:
+        return self._auth("POST", f"{self.exec_url}/v1/cua/press", {"x": x, "y": y, "button": button})
+
+    def release(
+        self,
+        x: int | None = None,
+        y: int | None = None,
+        button: int | None = None,
+        path: list[dict[str, int]] | None = None,
+    ) -> Any:
+        return self._auth(
+            "POST",
+            f"{self.exec_url}/v1/cua/release",
+            {"x": x, "y": y, "button": button, "path": path},
+        )
+
     def type(self, text: str) -> Any:
         return self._auth("POST", f"{self.exec_url}/v1/cua/type", {"text": text})
 
@@ -182,9 +276,23 @@ class GrokBox:
         return self._decode(response, url)
 
     def _auth(self, method: str, url: str, json: Any | None = None) -> Any:
-        headers = {"authorization": f"Bearer {self.token}"}
+        headers = {
+            "authorization": f"Bearer {self.token}",
+            "x-request-id": self._request_id(),
+        }
         response = self._http.request(method, url, headers=headers, json=json)
         return self._decode(response, url)
+
+    def _body(self, response: httpx.Response) -> Any:
+        try:
+            return response.json()
+        except Exception:
+            return {"raw": response.text}
+
+    def _request_id(self) -> str:
+        import uuid
+
+        return str(uuid.uuid4())
 
     def _decode(self, response: httpx.Response, url: str) -> Any:
         body: Any

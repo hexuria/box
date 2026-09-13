@@ -27,6 +27,12 @@ pub fn layer() -> CorsLayer {
             Method::DELETE,
             Method::OPTIONS,
         ])
-        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT])
+        .allow_headers([
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            header::ACCEPT,
+            crate::REQUEST_ID_HEADER.clone(),
+        ])
+        .expose_headers([crate::REQUEST_ID_HEADER.clone()])
         .max_age(Duration::from_secs(600))
 }

@@ -70,13 +70,13 @@ fn resolve_against_canonical_root(root: &Path, user_path: &str) -> Result<PathBu
     };
 
     let lexical = normalize_lexical(&joined);
-    if !is_inside(&lexical, &root) {
+    if !is_inside(&lexical, root) {
         return Err(JailError::Escape);
     }
 
     if lexical.exists() {
         let canon = lexical.canonicalize()?;
-        if !is_inside(&canon, &root) {
+        if !is_inside(&canon, root) {
             return Err(JailError::Escape);
         }
         return Ok(canon);
@@ -103,7 +103,7 @@ fn resolve_against_canonical_root(root: &Path, user_path: &str) -> Result<PathBu
     }
 
     let canon_ancestor = ancestor.canonicalize()?;
-    if !is_inside(&canon_ancestor, &root) {
+    if !is_inside(&canon_ancestor, root) {
         return Err(JailError::Escape);
     }
 
@@ -111,7 +111,7 @@ fn resolve_against_canonical_root(root: &Path, user_path: &str) -> Result<PathBu
     let mut result = canon_ancestor;
     for part in missing {
         result.push(part);
-        if !is_inside(&result, &root) {
+        if !is_inside(&result, root) {
             return Err(JailError::Escape);
         }
     }
