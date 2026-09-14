@@ -9,6 +9,8 @@ mod error;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::{Request, Uri};
+use hyper_rustls::HttpsConnectorBuilder;
+use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use serde::{Deserialize, Serialize};
@@ -16,7 +18,17 @@ use serde_json::{json, Value};
 
 pub use error::Error;
 
-type HttpClient = Client<hyper_util::client::legacy::connect::HttpConnector, Full<Bytes>>;
+type Https = hyper_rustls::HttpsConnector<HttpConnector>;
+type HttpClient = Client<Https, Full<Bytes>>;
+
+fn build_http() -> HttpClient {
+    let https = HttpsConnectorBuilder::new()
+        .with_webpki_roots()
+        .https_or_http()
+        .enable_http1()
+        .build();
+    Client::builder(TokioExecutor::new()).build(https)
+}
 
 fn trim_slash(url: impl Into<String>) -> String {
     let url = url.into();
@@ -47,7 +59,7 @@ impl GrokBox {
                 "exec URL, host URL, and token are required".into(),
             ));
         }
-        let http = Client::builder(TokioExecutor::new()).build_http();
+        let http = build_http();
         Ok(Self {
             exec_url,
             host_url,
@@ -96,6 +108,16 @@ impl GrokBox {
         .await
     }
 
+    pub async fn exec_status(&self, id: &str) -> Result<ExecResponse, Error> {
+        self.send_json(
+            "GET",
+            &format!("{}/v1/exec/{}", self.exec_url, urlencoding(id)),
+            None,
+            true,
+        )
+        .await
+    }
+
     pub async fn files_get(&self, path: &str, encoding: Option<&str>) -> Result<Value, Error> {
         let mut url = format!("{}/v1/files?path={}", self.exec_url, urlencoding(path));
         if let Some(encoding) = encoding {
@@ -135,6 +157,96 @@ impl GrokBox {
             true,
         )
         .await
+    }
+
+    pub async fn files_rename(&self, from: &str, to: &str) -> Result<Value, Error> {
+        self.send_json(
+            "POST",
+            &format!("{}/v1/files/rename", self.exec_url),
+            Some(json!({ "from": from, "to": to })),
+            true,
+        )
+        .await
+    }
+
+    pub async fn files_get_raw(&self, path: &str) -> Result<Vec<u8>, Error> {
+        let url = format!("{}/v1/files/raw?path={}", self.exec_url, urlencoding(path));
+        let (status, bytes, _) = self
+            .send("GET", &url, None, true, "application/octet-stream")
+            .await?;
+        if !(200..300).contains(&status) {
+            let text = String::from_utf8_lossy(&bytes);
+            return Err(Error::from_status(status, &text));
+        }
+        Ok(bytes.to_vec())
+    }
+
+    pub async fn files_put_raw(&self, path: &str, body: Vec<u8>) -> Result<FilePutResponse, Error> {
+        let url = format!("{}/v1/files/raw?path={}", self.exec_url, urlencoding(path));
+        let (status, bytes, _) = self
+            .send_bytes("PUT", &url, Some(body), true, "application/json")
+            .await?;
+        if !(200..300).contains(&status) {
+            let text = String::from_utf8_lossy(&bytes);
+            return Err(Error::from_status(status, &text));
+        }
+        serde_json::from_slice(&bytes).map_err(|err| Error::Transport(err.to_string()))
+    }
+
+    pub async fn desktop(&self) -> Result<Value, Error> {
+        self.send_json("GET", &format!("{}/v1/desktop", self.host_url), None, true)
+            .await
+    }
+
+    pub async fn chrome(&self) -> Result<Value, Error> {
+        self.send_json("GET", &format!("{}/v1/chrome", self.host_url), None, true)
+            .await
+    }
+
+    pub async fn windows(&self) -> Result<Value, Error> {
+        self.send_json(
+            "GET",
+            &format!("{}/v1/desktop/windows", self.host_url),
+            None,
+            true,
+        )
+        .await
+    }
+
+    pub async fn busy(&self) -> Result<Value, Error> {
+        self.send_json("GET", &format!("{}/v1/busy", self.exec_url), None, true)
+            .await
+    }
+
+    pub async fn metrics(&self) -> Result<Value, Error> {
+        self.send_json("GET", &format!("{}/v1/metrics", self.exec_url), None, true)
+            .await
+    }
+
+    pub async fn shutdown(&self, host: bool) -> Result<Value, Error> {
+        let url = if host {
+            format!("{}/v1/shutdown", self.host_url)
+        } else {
+            format!("{}/v1/shutdown", self.exec_url)
+        };
+        self.send_json("POST", &url, None, true).await
+    }
+
+    pub async fn exec_stream(&self, request: &ExecRequest) -> Result<String, Error> {
+        let (status, bytes, _) = self
+            .send(
+                "POST",
+                &format!("{}/v1/exec/stream", self.exec_url),
+                Some(json!(request)),
+                true,
+                "application/x-ndjson",
+            )
+            .await?;
+        if !(200..300).contains(&status) {
+            let text = String::from_utf8_lossy(&bytes);
+            return Err(Error::from_status(status, &text));
+        }
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
     pub async fn screenshot(&self) -> Result<ScreenshotResponse, Error> {
@@ -327,6 +439,7 @@ impl GrokBox {
             builder = builder.header("authorization", format!("Bearer {}", self.token));
         }
         builder = builder.header("accept", accept);
+        builder = builder.header("x-request-id", next_request_id());
         if body.is_some() {
             builder = builder.header("content-type", "application/json");
         }
@@ -353,6 +466,55 @@ impl GrokBox {
             .to_bytes();
         Ok((status, bytes, content_type))
     }
+
+    async fn send_bytes(
+        &self,
+        method: &str,
+        url: &str,
+        body: Option<Vec<u8>>,
+        auth: bool,
+        accept: &str,
+    ) -> Result<(u16, Bytes, String), Error> {
+        let uri: Uri = url
+            .parse()
+            .map_err(|err: hyper::http::uri::InvalidUri| Error::Connect(err.to_string()))?;
+        let payload = body.unwrap_or_default();
+        let mut builder = Request::builder().method(method).uri(uri);
+        if auth {
+            builder = builder.header("authorization", format!("Bearer {}", self.token));
+        }
+        builder = builder.header("accept", accept);
+        builder = builder.header("x-request-id", next_request_id());
+        builder = builder.header("content-type", "application/octet-stream");
+        let request = builder
+            .body(Full::new(Bytes::from(payload)))
+            .map_err(|err| Error::Transport(err.to_string()))?;
+        let response = self
+            .http
+            .request(request)
+            .await
+            .map_err(|err| Error::Transport(err.to_string()))?;
+        let status = response.status().as_u16();
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .map_err(|err| Error::Transport(err.to_string()))?
+            .to_bytes();
+        Ok((status, bytes, content_type))
+    }
+}
+
+fn next_request_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(1);
+    format!("grok-box-{}", SEQ.fetch_add(1, Ordering::Relaxed))
 }
 
 fn urlencoding(value: &str) -> String {
@@ -379,6 +541,10 @@ pub struct ExecRequest {
     pub env: Option<std::collections::HashMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stdin: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detach: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pty: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -390,6 +556,12 @@ pub struct ExecResponse {
     pub duration_ms: u64,
     pub truncated: bool,
     pub cwd: String,
+    #[serde(default)]
+    pub exec_id: String,
+    #[serde(default)]
+    pub detached: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

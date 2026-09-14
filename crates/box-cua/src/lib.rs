@@ -17,19 +17,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use arrayvec::ArrayVec;
-use smallvec::SmallVec;
-use tokio::sync::Mutex;
-
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
+use box_common::env_bool;
 use box_desktop::{parse_geometry, DISPLAY_HEIGHT, DISPLAY_WIDTH};
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
+use tokio::sync::Mutex;
 
 pub use encode::{bgra_to_rgb, bgra_to_rgb_unchecked, encode_png_rgb, zpixmap_to_rgb};
 pub use keys::{char_to_keysym, parse_key_sequence, KeySeq};
 pub use recipe::{
     run_recipe, validate_recipe, RecipeArtifact, RecipeRequest, RecipeResponse, RecipeScreenshot,
-    RecipeStep, RecipeStepResult, MAX_RECIPE_STEPS, MAX_WAIT_MS,
+    RecipeSettle, RecipeStep, RecipeStepResult, MAX_RECIPE_STEPS, MAX_WAIT_MS,
 };
 
 static POINTER_WARMED: AtomicBool = AtomicBool::new(false);
@@ -632,16 +632,6 @@ pub fn drag_waypoints(
     out
 }
 
-fn env_bool(var: &str, default: bool) -> bool {
-    match env::var(var) {
-        Ok(raw) => {
-            let v = raw.trim().to_ascii_lowercase();
-            !matches!(v.as_str(), "0" | "false" | "off" | "no")
-        }
-        Err(_) => default,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -656,6 +646,17 @@ mod tests {
         assert!(validate_point(&cfg, 1280, 0).is_err());
         assert!(validate_point(&cfg, -1, 10).is_err());
         assert!(validate_point(&cfg, 10, 800).is_err());
+    }
+
+    #[test]
+    fn display_geom_drives_coordinate_space() {
+        let mut cfg = CuaConfig::disabled();
+        cfg.enabled = true;
+        cfg.width = 1920;
+        cfg.height = 1080;
+        assert!(validate_point(&cfg, 1919, 1079).is_ok());
+        assert!(validate_point(&cfg, 1920, 0).is_err());
+        assert!(validate_point(&cfg, 0, 1080).is_err());
     }
 
     #[test]

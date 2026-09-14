@@ -52,6 +52,7 @@ pub unsafe fn bgra_to_rgb_unchecked(src: &[u8], dst: &mut [u8]) {
 ///
 /// `stride` is bytes per scanline. Fast path: 32bpp little-endian with
 /// Xvfb's default masks (`R 0xff0000 G 0xff00 B 0xff`).
+#[allow(clippy::too_many_arguments)]
 pub fn zpixmap_to_rgb(
     data: &[u8],
     width: u32,

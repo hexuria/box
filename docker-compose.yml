@@ -4,6 +4,15 @@ services:
       context: .
       dockerfile: docker/Dockerfile
     image: grok-box:local
+    # Hardening is not a kernel sandbox. Unprivileged uid 1000 + Chromium
+    # --no-sandbox. These limits reduce blast radius; they do not isolate the
+    # guest from the host kernel.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 1024
+    mem_limit: 4g
     shm_size: "256mb"
     environment:
       BOX_TOKEN: ${BOX_TOKEN:?BOX_TOKEN is required}
@@ -23,6 +32,7 @@ services:
       BOX_CUA: ${BOX_CUA:-1}
       BOX_EXEC_BIND: 0.0.0.0:1337
       BOX_HOST_BIND: 0.0.0.0:1340
+      BOX_MAX_CONCURRENT_EXECS: ${BOX_MAX_CONCURRENT_EXECS:-8}
     ports:
       - "127.0.0.1:1337:1337"
       - "127.0.0.1:1340:1340"

@@ -149,12 +149,17 @@ echo "==> GET /v1/info (host)"
 info="$(curl -fsS -H "Authorization: Bearer ${TOKEN}" "${HOST_URL}/v1/info")"
 echo "${info}"
 echo "${info}" | grep -q '"box_id"'
-echo "${info}" | grep -q '"exec":true'
-echo "${info}" | grep -q '"files":true'
-echo "${info}" | grep -q '"desktop":true'
-echo "${info}" | grep -q '"chrome":true'
-echo "${info}" | grep -q '"cua":true'
 echo "${info}" | grep -q '"scope":"container-local"'
+if command -v python3 >/dev/null 2>&1; then
+  printf '%s' "${info}" | python3 -c '
+import json, sys
+c = json.load(sys.stdin)["capabilities"]
+for name in ("exec", "files", "desktop", "chrome", "cua"):
+    assert "enabled" in c[name] and "ready" in c[name], name
+assert c["exec"]["enabled"] and c["exec"]["ready"]
+print("capabilities objects ok")
+'
+fi
 
 echo "==> GET /v1/desktop (host)"
 desk="$(curl -fsS -H "Authorization: Bearer ${TOKEN}" "${HOST_URL}/v1/desktop")"
@@ -292,9 +297,18 @@ if [[ "${ok}" != "1" ]]; then
 fi
 off_info="$(curl -fsS -H "Authorization: Bearer ${TOKEN}" "${HOST_URL}/v1/info")"
 echo "${off_info}"
-echo "${off_info}" | grep -q '"desktop":false'
-echo "${off_info}" | grep -q '"chrome":false'
-echo "${off_info}" | grep -q '"cua":false'
+if command -v python3 >/dev/null 2>&1; then
+  printf '%s' "${off_info}" | python3 -c '
+import json, sys
+c = json.load(sys.stdin)["capabilities"]
+assert c["desktop"]["enabled"] is False
+assert c["chrome"]["enabled"] is False
+assert c["cua"]["enabled"] is False or c["cua"]["ready"] is False
+print("desktop-off capabilities ok")
+'
+else
+  echo "${off_info}" | grep -q '"enabled":false'
+fi
 curl -fsS -H "Authorization: Bearer ${TOKEN}" "${HOST_URL}/v1/ready" | grep -q '"exec_ready":true'
 off_exec="$(curl -fsS \
   -H "Authorization: Bearer ${TOKEN}" \

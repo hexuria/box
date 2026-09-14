@@ -1,24 +1,13 @@
-use std::time::Duration;
-
 use crate::{app, AppState};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use box_cua::CuaConfig;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
 fn state(dir: &TempDir) -> AppState {
-    AppState {
-        workspace: dir.path().canonicalize().unwrap(),
-        token: "secret-token".into(),
-        max_file_bytes: 1024 * 1024,
-        default_timeout: Duration::from_secs(5),
-        max_timeout: Duration::from_secs(10),
-        max_output_bytes: 64 * 1024,
-        cua: CuaConfig::disabled(),
-    }
+    AppState::for_test(dir.path().canonicalize().unwrap(), "secret-token")
 }
 
 async fn send(state: AppState, builder: Request<Body>) -> (StatusCode, Value) {
@@ -542,9 +531,215 @@ async fn exec_timeout_keeps_stdout() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["timed_out"], true);
-    assert!(body["exit_code"].is_null());
+    assert!(
+        body["exec_id"].as_str().unwrap().starts_with("exec-"),
+        "missing exec_id: {body}"
+    );
     assert!(
         body["stdout"].as_str().unwrap().contains("hello"),
         "timeout discarded stdout: {body}"
     );
+}
+
+#[tokio::test]
+async fn request_id_is_echoed() {
+    let dir = TempDir::new().unwrap();
+    let app = app(state(&dir));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/health")
+                .header("x-request-id", "smoke-id-1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("x-request-id").unwrap(),
+        "smoke-id-1"
+    );
+}
+
+#[tokio::test]
+async fn busy_reports_slots() {
+    let dir = TempDir::new().unwrap();
+    let (status, body) = send(
+        state(&dir),
+        Request::builder()
+            .uri("/v1/busy")
+            .header("authorization", "Bearer secret-token")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["execs"]["max"], 8);
+    assert_eq!(body["busy"], false);
+}
+
+#[tokio::test]
+async fn pty_is_rejected() {
+    let dir = TempDir::new().unwrap();
+    let (status, body) = send(
+        state(&dir),
+        auth_json(
+            "POST",
+            "/v1/exec",
+            "secret-token",
+            json!({"command":["echo","ok"],"pty":true}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_request");
+}
+
+#[tokio::test]
+async fn files_raw_roundtrip() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir);
+    let put = app(s.clone())
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/v1/files/raw?path=bin.dat")
+                .header("authorization", "Bearer secret-token")
+                .header("content-type", "application/octet-stream")
+                .body(Body::from(vec![0u8, 1, 2, 255]))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+
+    let get = app(s)
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/files/raw?path=bin.dat")
+                .header("authorization", "Bearer secret-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    assert_eq!(
+        get.headers().get("content-type").unwrap(),
+        "application/octet-stream"
+    );
+    let bytes = get.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&bytes[..], &[0u8, 1, 2, 255]);
+}
+
+#[tokio::test]
+async fn exec_stream_ndjson_exits() {
+    let dir = TempDir::new().unwrap();
+    let app = app(state(&dir));
+    let response = app
+        .oneshot(auth_json(
+            "POST",
+            "/v1/exec/stream",
+            "secret-token",
+            json!({"command":["echo","stream-ok"]}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let ctype = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(ctype.contains("ndjson"), "{ctype}");
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains("stream-ok"), "{text}");
+    assert!(
+        text.contains("\"type\":\"exit\"") || text.contains("\"type\": \"exit\""),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn exec_busy_returns_429() {
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::Semaphore;
+
+    let dir = TempDir::new().unwrap();
+    let mut s = state(&dir);
+    s.max_concurrent_execs = 1;
+    s.exec_slots = Arc::new(Semaphore::new(1));
+    let app_a = app(s.clone());
+    let app_b = app(s);
+    let first = tokio::spawn(async move {
+        app_a
+            .oneshot(auth_json(
+                "POST",
+                "/v1/exec",
+                "secret-token",
+                json!({"command":["sleep","2"],"timeout_ms":5000}),
+            ))
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let response = app_b
+        .oneshot(auth_json(
+            "POST",
+            "/v1/exec",
+            "secret-token",
+            json!({"command":["echo","x"]}),
+        ))
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&bytes).unwrap_or_else(|_| json!({"raw": ""}));
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert_eq!(body["error"]["code"], "busy");
+    let _ = first.await;
+}
+
+#[tokio::test]
+async fn exec_detach_then_status() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir);
+    let (status, body) = send(
+        s.clone(),
+        auth_json(
+            "POST",
+            "/v1/exec",
+            "secret-token",
+            json!({"command":["echo","detached-ok"],"detach":true}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["detached"], true);
+    assert_eq!(body["status"], "running");
+    let id = body["exec_id"].as_str().expect("exec_id").to_string();
+    let mut last = body;
+    for _ in 0..80 {
+        let (st, b) = send(
+            s.clone(),
+            Request::builder()
+                .uri(format!("/v1/exec/{id}"))
+                .header("authorization", "Bearer secret-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{b}");
+        last = b;
+        if last["status"] == "done" || last["exit_code"] == 0 {
+            let stdout = last["stdout"].as_str().unwrap_or("");
+            assert!(stdout.contains("detached-ok"), "{last}");
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("detached job never finished: {last}");
 }

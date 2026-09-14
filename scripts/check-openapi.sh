@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Fail if docs/openapi.yaml is missing advertised guest routes.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SPEC="${ROOT}/docs/openapi.yaml"
+
+if [[ ! -f "${SPEC}" ]]; then
+  echo "missing ${SPEC}" >&2
+  exit 1
+fi
+
+need=(
+  "/v1/health:"
+  "/v1/ready:"
+  "/v1/info:"
+  "/v1/exec:"
+  "/v1/exec/{id}:"
+  "/v1/exec/stream:"
+  "/v1/files:"
+  "/v1/files/raw:"
+  "/v1/files/mkdir:"
+  "/v1/files/rename:"
+  "/v1/busy:"
+  "/v1/shutdown:"
+  "/v1/metrics:"
+  "/v1/desktop:"
+  "/v1/desktop/windows:"
+  "/v1/chrome:"
+  "/v1/cua/screenshot:"
+  "/v1/cua/click:"
+  "/v1/cua/press:"
+  "/v1/cua/release:"
+  "/v1/cua/mousedown:"
+  "/v1/cua/mouseup:"
+  "/v1/cua/recipe:"
+)
+
+missing=0
+for p in "${need[@]}"; do
+  if ! grep -q -- "${p}" "${SPEC}"; then
+    echo "openapi missing path ${p}" >&2
+    missing=1
+  fi
+done
+
+if ! grep -q "settle" "${SPEC}"; then
+  echo "openapi missing recipe settle" >&2
+  missing=1
+fi
+if ! grep -q "reset_desktop" "${SPEC}"; then
+  echo "openapi missing reset_desktop" >&2
+  missing=1
+fi
+if ! grep -q "x-request-id" "${SPEC}"; then
+  echo "openapi missing x-request-id" >&2
+  missing=1
+fi
+
+if [[ "${missing}" != "0" ]]; then
+  exit 1
+fi
+echo "OpenAPI presence OK"

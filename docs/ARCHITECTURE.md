@@ -51,8 +51,8 @@ Full list: [TERMINOLOGY.md](TERMINOLOGY.md).
 
 | Port | Process | Routes / role |
 | --- | --- | --- |
-| **1337** | `box-exec` | `GET /v1/health`, `POST /v1/exec`, `GET\|PUT\|DELETE /v1/files`, `POST /v1/files/mkdir`, `POST /v1/cua/*` |
-| **1340** | `box-host` | `GET /v1/health`, `GET /v1/ready`, `GET /v1/info`, `GET /v1/desktop`, `GET /v1/chrome` |
+| **1337** | `box-exec` | `GET /v1/health`, `POST /v1/exec`, `POST /v1/exec/stream`, files (JSON + raw), CUA, busy/metrics/shutdown |
+| **1340** | `box-host` | `GET /v1/health`, `GET /v1/ready`, `GET /v1/info`, `GET /v1/desktop`, `GET /v1/desktop/windows`, `GET /v1/chrome`, busy/metrics/shutdown |
 | **6080** | websockify + noVNC | Viewer HTML at `/vnc.html`. Published by Compose. |
 | 5900 | x11vnc | RFB on **localhost only** (`BOX_VNC_BIND`). Not published. |
 | 9222 | Chromium CDP | **localhost only**. Not published. |
@@ -72,7 +72,7 @@ Bind addresses: inside the guest image, `BOX_EXEC_BIND` / `BOX_HOST_BIND` defaul
 - **Viewer:** noVNC is not Bearer-authenticated. x11vnc uses `BOX_VNC_PASSWORD` (first 8 characters). Independent of `BOX_TOKEN`. Host publish is loopback.
 - **CORS:** default is no browser origins. Set `BOX_CORS_ORIGINS` to an explicit comma-separated list if a browser must call the guest. `*` is ignored.
 
-WebSocket streaming for exec is **not** in this tree. Use `POST /v1/exec` (bounded output, timeout; stdout/stderr are kept on timeout).
+WebSocket streaming for exec is **not** in this tree. Use `POST /v1/exec` (bounded output, timeout; stdout/stderr are kept on timeout) or `POST /v1/exec/stream` (NDJSON/SSE). PTY is deferred.
 
 ## `/v1/info` URLs
 
