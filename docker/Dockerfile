@@ -25,7 +25,18 @@ RUN apt-get update \
         x11vnc \
         novnc \
         websockify \
-        openbox \
+        # A real desktop: xfce4 session with xfwm4, the panel as the dock
+        # (Terminal, Chromium, Files), Thunar, a terminal, and the default
+        # wallpaper. dbus-x11 is what the xfce pieces talk over. Measured at
+        # +270 MB over the previous openbox-only image.
+        xfce4-session \
+        xfwm4 \
+        xfce4-panel \
+        xfdesktop4 \
+        xfce4-settings \
+        thunar \
+        xfce4-terminal \
+        dbus-x11 \
         x11-utils \
         xfonts-base \
         fonts-liberation \
@@ -47,11 +58,26 @@ COPY --from=builder /src/target/release/box-host /usr/local/bin/box-host
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY docker/websockify-nodelay.py /usr/local/bin/websockify-nodelay
 COPY docker/box-reset-desktop.sh /usr/local/bin/box-reset-desktop
+COPY docker/box-release-keys /usr/local/bin/box-release-keys
 COPY docker/chromium-policies.json /etc/chromium/policies/managed/grok-box.json
 COPY docker/chromium-policies.json /etc/opt/chrome/policies/managed/grok-box.json
+# The dock's Chromium launcher: same profile as the entrypoint's Chromium, so a
+# click opens a window in the running instance instead of a second browser.
+COPY docker/box-chromium /usr/local/bin/box-chromium
+# Panel with Terminal / Chromium / Files launchers, so xfce4-panel never shows
+# its first-run wizard and the dock is there from the first frame.
+COPY --chown=box:box docker/xfce/xfce4-panel.xml /home/box/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml
+COPY --chown=box:box docker/xfce/xfce4-desktop.xml /home/box/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml
+COPY --chown=box:box docker/xfce/xfwm4.xml /home/box/.config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml
+COPY --chown=box:box docker/xfce/launchers/chromium.desktop /home/box/.config/xfce4/panel/launcher-1/chromium.desktop
+COPY --chown=box:box docker/xfce/launchers/files.desktop /home/box/.config/xfce4/panel/launcher-2/files.desktop
+COPY --chown=box:box docker/xfce/launchers/terminal.desktop /home/box/.config/xfce4/panel/launcher-3/terminal.desktop
+# The desktop's wallpaper, named by xfce4-desktop.xml above.
+COPY docker/xfce/wallpaper.png /usr/share/backgrounds/grok-box.png
 # chromium-launch.sh is intentionally not installed. Entrypoint owns Chromium.
 RUN chmod 755 /usr/local/bin/entrypoint.sh /usr/local/bin/websockify-nodelay /usr/local/bin/box-exec /usr/local/bin/box-host \
-        /usr/local/bin/box-reset-desktop
+        /usr/local/bin/box-reset-desktop /usr/local/bin/box-release-keys /usr/local/bin/box-chromium \
+    && chown -R box:box /home/box/.config
 
 ENV WORKSPACE_ROOT=/workspace \
     BOX_EXEC_BIND=0.0.0.0:1337 \

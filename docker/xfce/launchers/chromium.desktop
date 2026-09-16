@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Chromium
+Comment=Open the box's browser
+Exec=box-chromium
+Icon=chromium
+Terminal=false
+StartupNotify=false

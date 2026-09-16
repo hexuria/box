@@ -1,0 +1,17 @@
+#!/bin/sh
+# The dock's Chromium. Same profile as the Chromium the entrypoint starts
+# (BOX_CHROME=1), so this opens a window in that instance; with no instance
+# running it starts one. uid 1000 has no setuid sandbox in this image, hence
+# --no-sandbox, and --test-type hides the banner about it.
+exec chromium \
+  --user-data-dir="${BOX_CHROME_PROFILE:-/home/box/chrome-profile}" \
+  --no-first-run \
+  --no-default-browser-check \
+  --disable-dev-shm-usage \
+  --disable-gpu \
+  --no-sandbox \
+  --test-type \
+  --hide-crash-restore-bubble \
+  --disable-session-crashed-bubble \
+  --disable-features=Translate \
+  "$@"

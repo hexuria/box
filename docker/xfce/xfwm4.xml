@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The window manager: compositing on, so the dock's transparent plate is
+     transparent (without a compositor every panel is a solid box); no
+     workspace switching gestures a coworker could trip. -->
+<channel name="xfwm4" version="1.0">
+  <property name="general" type="empty">
+    <property name="use_compositing" type="bool" value="true"/>
+    <property name="workspace_count" type="int" value="1"/>
+    <property name="wrap_workspaces" type="bool" value="false"/>
+    <property name="show_dock_shadow" type="bool" value="false"/>
+  </property>
+</channel>
