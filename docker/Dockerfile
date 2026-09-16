@@ -58,6 +58,7 @@ COPY --from=builder /src/target/release/box-host /usr/local/bin/box-host
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY docker/websockify-nodelay.py /usr/local/bin/websockify-nodelay
 COPY docker/box-reset-desktop.sh /usr/local/bin/box-reset-desktop
+COPY docker/box-release-keys /usr/local/bin/box-release-keys
 COPY docker/chromium-policies.json /etc/chromium/policies/managed/grok-box.json
 COPY docker/chromium-policies.json /etc/opt/chrome/policies/managed/grok-box.json
 # The dock's Chromium launcher: same profile as the entrypoint's Chromium, so a
@@ -75,7 +76,7 @@ COPY --chown=box:box docker/xfce/launchers/terminal.desktop /home/box/.config/xf
 COPY docker/xfce/wallpaper.png /usr/share/backgrounds/grok-box.png
 # chromium-launch.sh is intentionally not installed. Entrypoint owns Chromium.
 RUN chmod 755 /usr/local/bin/entrypoint.sh /usr/local/bin/websockify-nodelay /usr/local/bin/box-exec /usr/local/bin/box-host \
-        /usr/local/bin/box-reset-desktop /usr/local/bin/box-chromium \
+        /usr/local/bin/box-reset-desktop /usr/local/bin/box-release-keys /usr/local/bin/box-chromium \
     && chown -R box:box /home/box/.config
 
 ENV WORKSPACE_ROOT=/workspace \

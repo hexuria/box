@@ -127,6 +127,10 @@ start_desktop() {
 
   echo "starting x11vnc on ${BOX_VNC_BIND} (localhost only)"
   # LAN flags: XDAMAGE (not polling the whole 1280×800), short wait/defer.
+  # Keys: -xkb maps the viewer's keysyms through XKEYBOARD (Mac and non-US
+  # layouts otherwise lose keys); -clear_mods/-clear_keys start clean; and
+  # every client that arrives or leaves runs box-release-keys, so a ⌘ held
+  # when a window closed cannot stay held in this X server.
   x11vnc \
     -display "${BOX_DISPLAY}" \
     -rfbport "$(vnc_port)" \
@@ -139,6 +143,11 @@ start_desktop() {
     -speeds lan \
     -wait 10 \
     -defer 5 \
+    -xkb \
+    -clear_mods \
+    -clear_keys \
+    -afteraccept /usr/local/bin/box-release-keys \
+    -gone /usr/local/bin/box-release-keys \
     >/tmp/x11vnc.log 2>&1 &
   record $!
 
