@@ -107,8 +107,15 @@ start_desktop() {
 
   export DISPLAY="${BOX_DISPLAY}"
 
-  echo "starting openbox on ${DISPLAY}"
-  openbox &
+  echo "starting xfce4 on ${DISPLAY}"
+  # xfce4-session brings up xfwm4, xfdesktop and the panel; they talk over
+  # dbus. dbus-launch stays alive for the session, so the watchdog below
+  # treats the desktop going away like any other required process.
+  export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-box}"
+  export XDG_CONFIG_HOME="${HOME:-/home/box}/.config"
+  mkdir -p "${XDG_RUNTIME_DIR}"
+  chmod 700 "${XDG_RUNTIME_DIR}"
+  dbus-launch --exit-with-session xfce4-session >/tmp/xfce4-session.log 2>&1 &
   record $!
 
   mkdir -p "${HOME:-/home/box}/.vnc"

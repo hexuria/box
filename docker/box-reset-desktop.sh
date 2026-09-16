@@ -1,18 +1,19 @@
 #!/bin/bash
 # Restore a clean guest desktop without restarting Docker / X / VNC / Chromium.
-# Close non-Chromium client windows and leftover jobs. Leave tint2 + Openbox +
-# x11vnc + the entrypoint Chromium process running (one Chromium model).
+# Close client windows and leftover jobs. Leave the xfce session (xfwm4, panel,
+# xfdesktop, settings daemon) + x11vnc + the entrypoint Chromium process running
+# (one Chromium model).
 set -uo pipefail
 
 export DISPLAY="${DISPLAY:-${BOX_DISPLAY:-:1}}"
-export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-openbox}"
+export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-XFCE}"
 
 uid="$(id -u)"
 self="$$"
 
 protected_comm() {
   case "$1" in
-    tini|entrypoint.sh|box-exec|box-host|Xvfb|Xorg|openbox|tint2|x11vnc|websockify|websockify-nodelay|dbus-daemon|dbus-launch|pipewire|pipewire-pulse|pulseaudio|ssh-agent|gpg-agent|ffmpeg|sleep|chromium|chrome)
+    tini|entrypoint.sh|box-exec|box-host|Xvfb|Xorg|openbox|tint2|xfce4-session|xfwm4|xfce4-panel|xfdesktop|xfsettingsd|xfconfd|x11vnc|websockify|websockify-nodelay|dbus-daemon|dbus-launch|pipewire|pipewire-pulse|pulseaudio|ssh-agent|gpg-agent|ffmpeg|sleep|chromium|chrome)
       return 0
       ;;
   esac
@@ -24,10 +25,10 @@ protected_class() {
   inst="${1%%.*}"
   cls="${1#*.}"
   case "${inst}" in
-    tint2|Tint2|Openbox|openbox|xfdesktop|N/A|Chromium|chromium|Google-chrome|google-chrome|"") return 0 ;;
+    tint2|Tint2|Openbox|openbox|xfdesktop|Xfdesktop|xfce4-panel|Xfce4-panel|xfwm4|Xfwm4|N/A|Chromium|chromium|Google-chrome|google-chrome|"") return 0 ;;
   esac
   case "${cls}" in
-    tint2|Tint2|Openbox|openbox|xfdesktop|N/A|Chromium|chromium|Google-chrome|google-chrome|"") return 0 ;;
+    tint2|Tint2|Openbox|openbox|xfdesktop|Xfdesktop|xfce4-panel|Xfce4-panel|xfwm4|Xfwm4|N/A|Chromium|chromium|Google-chrome|google-chrome|"") return 0 ;;
   esac
   return 1
 }
