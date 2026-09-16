@@ -35,16 +35,19 @@
   </property>
   <property name="plugins" type="empty">
     <property name="plugin-1" type="string" value="launcher">
+      <property name="disable-tooltips" type="bool" value="true"/>
       <property name="items" type="array">
         <value type="string" value="chromium.desktop"/>
       </property>
     </property>
     <property name="plugin-2" type="string" value="launcher">
+      <property name="disable-tooltips" type="bool" value="true"/>
       <property name="items" type="array">
         <value type="string" value="files.desktop"/>
       </property>
     </property>
     <property name="plugin-3" type="string" value="launcher">
+      <property name="disable-tooltips" type="bool" value="true"/>
       <property name="items" type="array">
         <value type="string" value="terminal.desktop"/>
       </property>

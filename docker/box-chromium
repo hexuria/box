@@ -11,5 +11,7 @@ exec chromium \
   --disable-gpu \
   --no-sandbox \
   --test-type \
+  --hide-crash-restore-bubble \
+  --disable-session-crashed-bubble \
   --disable-features=Translate \
   "$@"
