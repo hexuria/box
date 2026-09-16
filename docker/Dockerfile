@@ -66,9 +66,13 @@ COPY docker/box-chromium /usr/local/bin/box-chromium
 # Panel with Terminal / Chromium / Files launchers, so xfce4-panel never shows
 # its first-run wizard and the dock is there from the first frame.
 COPY --chown=box:box docker/xfce/xfce4-panel.xml /home/box/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml
-COPY --chown=box:box docker/xfce/launchers/terminal.desktop /home/box/.config/xfce4/panel/launcher-1/terminal.desktop
-COPY --chown=box:box docker/xfce/launchers/chromium.desktop /home/box/.config/xfce4/panel/launcher-2/chromium.desktop
-COPY --chown=box:box docker/xfce/launchers/files.desktop /home/box/.config/xfce4/panel/launcher-3/files.desktop
+COPY --chown=box:box docker/xfce/xfce4-desktop.xml /home/box/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml
+COPY --chown=box:box docker/xfce/xfwm4.xml /home/box/.config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml
+COPY --chown=box:box docker/xfce/launchers/chromium.desktop /home/box/.config/xfce4/panel/launcher-1/chromium.desktop
+COPY --chown=box:box docker/xfce/launchers/files.desktop /home/box/.config/xfce4/panel/launcher-2/files.desktop
+COPY --chown=box:box docker/xfce/launchers/terminal.desktop /home/box/.config/xfce4/panel/launcher-3/terminal.desktop
+# The desktop's wallpaper, named by xfce4-desktop.xml above.
+COPY docker/xfce/wallpaper.png /usr/share/backgrounds/grok-box.png
 # chromium-launch.sh is intentionally not installed. Entrypoint owns Chromium.
 RUN chmod 755 /usr/local/bin/entrypoint.sh /usr/local/bin/websockify-nodelay /usr/local/bin/box-exec /usr/local/bin/box-host \
         /usr/local/bin/box-reset-desktop /usr/local/bin/box-chromium \
