@@ -293,6 +293,37 @@ recipe="$(curl -fsS \
 echo "${recipe}"
 echo "${recipe}" | grep -q '"ok":true'
 echo "${recipe}" | grep -q '"ran":3'
+# A recipe that did not ask to be observed must get the receipt it has always
+# got. That is the compatibility promise, checked on the wire.
+if echo "${recipe}" | grep -q '"observed"'; then
+  echo "observe defaults to off; an unasked receipt must not carry observations" >&2
+  exit 1
+fi
+
+echo "==> POST /v1/cua/recipe (observe: input)"
+observed="$(curl -fsS \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"smoke-observe","screenshot":"none","observe":"input","steps":[{"op":"click","x":120,"y":120,"button":1},{"op":"type","text":"x"},{"op":"wait","ms":10}]}' \
+  "${EXEC_URL}/v1/cua/recipe")"
+echo "${observed}"
+echo "${observed}" | grep -q '"ok":true'
+echo "${observed}" | grep -q '"observed"'
+echo "${observed}" | grep -q '"observe_ms"'
+# The type step reports where the text was about to go, whatever the answer.
+echo "${observed}" | grep -q '"focus"'
+# A wait has nothing to look at and must not carry an empty block: absence of
+# `observed` has to keep meaning "the box did not look".
+if command -v python3 >/dev/null 2>&1; then
+  printf '%s' "${observed}" | python3 -c '
+import json, sys
+steps = json.load(sys.stdin)["steps"]
+seen = {s["op"]: ("observed" in s) for s in steps}
+assert seen.get("click") is True, seen
+assert seen.get("type") is True, seen
+assert seen.get("wait") is False, seen
+'
+fi
 
 echo "==> BOX_DESKTOP=0 still serves exec+host"
 "${COMPOSE[@]}" down --remove-orphans >/dev/null 2>&1 || true

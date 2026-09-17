@@ -64,6 +64,61 @@ The video is a guest file (`cook.mp4`), not a new VNC session. `reset_desktop` (
 
 Wait is capped at 10s per step. `stop_on_error` defaults true; earlier steps stay in the receipt (`ok: false`, `stopped_at`).
 
+## A receipt says no step errored, not that anything happened
+
+A taped recipe is a list of fixed coordinates. Replay it against a desktop that has moved on and every step is still *delivered*: the click lands somewhere, the text goes to whatever holds focus, `Return` is pressed. Nothing raises an error, so `ok` is `true` and `stopped_at` is `null` — and that receipt is identical to the receipt of the run that worked.
+
+That is what `ok` has always measured, and it stays that way. Making it cleverer would mean the guest guessing at what a recipe was *for*, and a wrong guess in the confident direction is the failure being fixed here. The guest reports what it **saw** instead, and the caller judges.
+
+`observe` is `off` (default), `input`, or `page`:
+
+```json
+{
+  "observe": "page",
+  "steps": [
+    { "op": "click", "x": 529, "y": 126 },
+    { "op": "type", "text": "kabisado" },
+    { "op": "key", "key": "Return" }
+  ]
+}
+```
+
+Each step that had something to look at gains an `observed` block:
+
+```json
+{
+  "index": 0, "op": "click", "ok": true, "ms": 14,
+  "observed": {
+    "target": { "id": "0x02a00003", "class": "chromium.Chromium", "title": "kabisado - YouTube" },
+    "url_before": "https://www.youtube.com/results?search_query=kabisado",
+    "url_after": "https://www.youtube.com/results?search_query=kabisado",
+    "observe_ms": 3
+  }
+}
+```
+
+Three facts, no verdict:
+
+- **`target`** — the window covering the step's target coordinate, read with `TranslateCoordinates` *before* the pointer moves, so it is what the click is about to hit rather than what the click left behind. A taped click that now lands on a different window shows up as a `class` or `title` that changed between runs.
+- **`focus`** — where the keys were about to go, for `type` and `key`. `state: "none"` means no window held the keyboard focus and the X server discarded the keystrokes.
+- **`url_before` / `url_after`** — the page Chromium was showing either side of a `click`, `double_click`, `type` or `key`. A `Return` that submitted nothing is a URL that did not move.
+
+Absence is load-bearing. **No `observed` key on a step means the guest did not look.** A block that is present with a field missing means it looked and got no answer — a window that closed mid-observation, an X server that did not answer inside 400 ms, a Chromium that is not running. Neither is ever reported as an empty string, because "the guest saw nothing there" and "the guest could not see" are different facts. The receipt also echoes `observe` at the top level (absent when `off`), so a receipt read a long way from its request still says whether the guest was looking at all.
+
+What it costs:
+
+| mode | per step | mechanism |
+| --- | --- | --- |
+| `off` | nothing | no probes; the receipt is byte-identical to before the field existed |
+| `input` | ~10 X round-trips for a pointer step, ~4 for a `type` | `TranslateCoordinates` down to the window at the coordinate, `QueryTree` + `GetProperty` up to the client window that names it, `GetInputFocus` |
+| `page` | `input`, plus **two** DevTools calls (one each side) on click / double\_click / type / key | Chromium DevTools `GET /json` on loopback |
+
+Put beside what a step already costs: `CLICK_GAP` is 12 ms per click and typed characters are paced at 30 ms each, so observing a click is an order of magnitude cheaper than clicking it. `page` is the mode that scales into something worth noticing — 256 steps is up to 512 DevTools calls — which is why it is separate from `input` rather than bundled into one switch.
+
+No process is forked for either mode. This deliberately does not go through `wmctrl` or `xdotool`, which the settle path uses and which cost a fork, an exec and a fresh X connection every time. Observation runs on its own X connection so a slow read cannot park the socket the next keystroke needs; each X observation is bounded at 400 ms and each DevTools read at 250 ms, so neither a wedged server nor a hung browser can stretch a recipe. A probe that fails costs the receipt a fact, never the recipe a step. `observe_ms` on each block reports what that step actually spent looking, and is not counted in the step's `ms` — so the cost is measurable from a receipt rather than taken on trust.
+
+`observe` never waits for a page to load and never launches anything — that is what `settle` is for. `url_after` is read as soon as the step returns (after any `settle` wait), so a `Return` that *did* navigate will often still show the old URL there and the new one in the next step's `url_before`.
+
 CLI:
 
 ```bash
@@ -79,7 +134,7 @@ SDKs: `client.recipe({ steps: [...] })`. EnsureBox demo proxy: `POST /api/v1/box
 | Who writes the plan | Compiler from wants + world model | The model, every turn | The caller (usually the model, once) |
 | Model in the loop | Median 1, then 0 on `--recipe` | Every click | Not during this HTTP call |
 | Parallelism | DAG of API effects | n/a | **No** — one X pointer |
-| Receipt | Ledger, idempotency keys | `{ok:true}` per verb | Per-step `ok` / `ms` / optional PNG |
+| Receipt | Ledger, idempotency keys | `{ok:true}` per verb | Per-step `ok` / `ms` / optional PNG / optional `observed` |
 | Screen | Optional CDP driver | X11 1280×800 | Same X11, batched |
 | WebMCP | Consumes app-published actions | Not in this repo | Not in this repo |
 | When to use | Annotated business app | Next click needs a new picture | Choreography already known |

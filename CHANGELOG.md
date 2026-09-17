@@ -47,6 +47,16 @@ Guest honesty and wire parity against BOX-REVIEW P0 → P1 (selective P2). Basel
 | One `ChildGuard` owns the process group, so timeout, disconnect and explicit cancel all SIGTERM → SIGKILL the group; `DELETE /v1/exec/{id}`; `execs.child_groups` on `/v1/metrics` (#15) | `crates/box-exec`, openapi, API.md, SDKs, CLI |
 | Secrets delivered as files (`BOX_TOKEN_FILE`, `BOX_HOST_TOKEN_FILE`, `BOX_VNC_PASSWORD_FILE`), read and unlinked; Compose and EnsureBox mount instead of exporting; `wipe_secret_environ` doc corrected to what `unsetenv` actually does (#12) | `crates/box-common/src/config.rs`, `docker/entrypoint.sh`, `docker-compose.yml`, `ensurebox`, README, ARCHITECTURE, DEPLOY |
 
+## Recipe receipts report what was observed (#28)
+
+| Item | Where |
+| --- | --- |
+| Optional `observe` on a recipe (`off` default / `input` / `page`); each step gains an `observed` block, and `ok` still means only that no step returned an error | `crates/box-cua/src/observe.rs`, `src/recipe.rs`, openapi, API.md, RECIPES.md, TS SDK, l1 |
+| `target` — the window covering a pointer step's coordinate, read with `TranslateCoordinates` before the pointer moves, so a taped click that now lands elsewhere is visible | `crates/box-cua/src/x11.rs` |
+| `focus` — where a `type` or `key` was about to go; `state: "none"` is text the X server discarded | `crates/box-cua/src/x11.rs` |
+| `url_before` / `url_after` around click/type/key from the CDP HTTP endpoint, so a `Return` that submitted nothing is a URL that did not move | `crates/box-cua/src/observe.rs` |
+| Observation has its own X connection and its own 400ms deadline, forks nothing, and never fails a step; `observe_ms` reports what each step spent looking | `crates/box-cua/src/x11.rs` |
+
 ## Deferred
 
 - PTY exec (use `/v1/exec/stream`)

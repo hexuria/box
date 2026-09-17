@@ -312,6 +312,42 @@ Many CUA steps in **one** request. The guest lints the plan (empty, too many ste
 
 `200` is a receipt (`ok`, `ran`, `stopped_at`, `duration_ms`, `steps[]`, optional `screenshot`, `artifacts[]`). When `artifact_dir` is set, PNG/video are workspace files (`path` on the receipt) so a client can fetch them without inline base64. `record: true` starts x11grab **before the first CUA step** and SIGINT-stops after the last (no `-t`), then remuxes the tape to progressive `+faststart` MP4. `reset_desktop` closes guest windows on this X session. A step failure with `stop_on_error: true` is still **200** with `ok: false`. Max 256 steps. Wait max 10s per step. Optional `settle` is `off` (default: no extra Chromium/page waits, no launch/close side effects), `compressed`, or `raw`. Keys and typed characters are paced so Chromium can map them. Combined chords are one step (`{ "op": "key", "key": "ctrl+l" }`), not ctrl/l down/up.
 
+#### What `ok` means, and what `observe` adds
+
+`ok` means **no step returned an error**. It does not mean the recipe achieved anything. A recipe of fixed coordinates played against a desktop that has moved on delivers every step without error, so a run that did nothing and a run that worked are the same receipt. The box cannot know what a recipe was *for*, so `ok` is left alone rather than made to guess, and the receipt reports what was seen instead.
+
+Optional `observe` is `off` (default), `input`, or `page`:
+
+- **`off`** — the receipt this endpoint produced before the field existed, byte for byte. No probes, no cost.
+- **`input`** — each step gains an `observed` block carrying `target` (the window covering the step's target coordinate, read **before** the step moved anything) for pointer steps, and `focus` (where the keys were about to go) for `type` and `key`. Both are X11 requests on a connection the box already holds — no processes are forked.
+- **`page`** — everything `input` gives, plus `url_before` / `url_after` around `click`, `double_click`, `type` and `key`, read from the Chromium DevTools HTTP endpoint on loopback.
+
+```json
+{
+  "index": 5,
+  "op": "click",
+  "ok": true,
+  "ms": 14,
+  "observed": {
+    "target": { "id": "0x02a00003", "class": "chromium.Chromium", "title": "kabisado - YouTube" },
+    "url_before": "https://www.youtube.com/results?search_query=kabisado",
+    "url_after": "https://www.youtube.com/results?search_query=kabisado",
+    "observe_ms": 3
+  }
+}
+```
+
+Reading a receipt:
+
+- The receipt echoes `observe` at the top level, absent when it was `off`. A receipt is often read a long way from the request that produced it, and without the echo a receipt with no `observed` blocks could not be told apart from one that never asked for any.
+- **No `observed` key** on a step means the box did not look — `observe` was `off`, or the step had nothing to look at (`wait`, `screenshot`, `reset_desktop`, a `release` with no coordinate).
+- **An `observed` block with a field missing** means the box looked and got no answer. Absent is never "nothing was there": a window that closed mid-observation, an X server that did not answer inside 400 ms, and a Chromium that is not running all read as absent.
+- `focus.state` is `none`, `pointer_root`, `root`, or `window`. **`none` means no window held the keyboard focus**, so the X server discarded the keystrokes and the `type` reached nothing at all. `root` is the window manager parking focus where nothing on this desktop listens, which is also nowhere.
+- `url_after` is read as soon as the step returns (after any `settle` wait). A browser navigation is not instant, so a `Return` that *did* navigate often still shows the old URL there and the new one in the next step's `url_before`. A URL that never moves across a whole run is a `Return` that submitted nothing.
+- `observe_ms` is the wall time that step spent looking rather than acting. It is **not** counted in the step's `ms`, the same way a per-step screenshot never was.
+
+Cost, so a caller can decide rather than be surprised. `input` forks nothing: it is about **ten X round-trips** for a pointer step and about **four** for a `type`, over the box's own unix socket, on a connection held separately from the input one. That is an order of magnitude below the pacing a step already pays — `CLICK_GAP` is 12ms per click and typed characters are paced at 30ms each. `page` adds **two** DevTools HTTP calls per observed step (one each side); where Chromium is not listening, the loopback connection is refused immediately, and where it is hung, each call is capped at 250ms. Every observation is bounded at 400ms on the X side, and one that fails costs the receipt a fact, never the recipe a step. `observe` changes no timing except its own: it never waits for a page to load and it never launches anything.
+
 ---
 
 ## box-host `:1340`

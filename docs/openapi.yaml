@@ -372,6 +372,18 @@ components:
         record: { type: boolean, default: false }
         artifact_dir: { type: string }
         settle: { type: string, enum: [off, compressed, raw], default: off }
+        observe:
+          type: string
+          enum: [off, input, page]
+          default: off
+          description: >-
+            What the receipt reports about the desktop the steps ran against.
+            off (the default) adds nothing to the receipt and costs nothing.
+            input adds the window under each pointer step's target and the
+            keyboard focus before each type/key, read over X11 on a connection
+            the box already holds. page adds those plus the Chromium page URL
+            either side of click, double_click, type and key. Neither changes
+            ok, which still means only that no step returned an error.
         steps:
           type: array
           minItems: 1
@@ -383,12 +395,92 @@ components:
               op:
                 type: string
                 enum: [click, double_click, double-click, move, drag, type, key, scroll, wait, screenshot, press, mousedown, release, mouseup, reset_desktop, reset]
+    ObservedWindow:
+      type: object
+      required: [id]
+      properties:
+        id:
+          type: string
+          description: >-
+            X window id in the same 0x… form wmctrl -lx and
+            GET /v1/desktop/windows print, so the two can be matched up.
+        class:
+          type: string
+          description: >-
+            WM_CLASS as instance.class. Absent when no window in the ancestry
+            claimed a class.
+        title:
+          type: string
+          description: >-
+            _NET_WM_NAME, falling back to WM_NAME. For a Chromium window this
+            is the page title.
+    StepObservation:
+      type: object
+      required: [observe_ms]
+      description: >-
+        What the box saw around one step. The block is present only when
+        observe asked for it and the step had something to look at; its
+        absence means the box did not look. A field missing inside a block
+        that is present means the box looked and got no answer — never that
+        nothing was there.
+      properties:
+        target:
+          allOf: [{ $ref: "#/components/schemas/ObservedWindow" }]
+          description: >-
+            The window covering this step's target coordinate, read before the
+            step moved anything. A taped click that now lands on a different
+            window shows up as a class or title that changed between runs.
+        focus:
+          type: object
+          required: [state]
+          description: Where the keys were about to go. Read for type and key only.
+          properties:
+            state:
+              type: string
+              enum: [none, pointer_root, root, window]
+              description: >-
+                none means no window held the focus and the X server would have
+                discarded the keystrokes: the type reached nothing at all. root
+                means the window manager had parked focus on the root window,
+                which on this desktop is also nowhere.
+            window: { $ref: "#/components/schemas/ObservedWindow" }
+        url_before:
+          type: string
+          description: >-
+            The page Chromium was showing before the step. Absent when no page
+            was visible at all, which is not the same as a blank address.
+        url_after:
+          type: string
+          description: >-
+            The page once the step and any settle wait returned. Read
+            immediately, and a browser navigation is not instant, so a Return
+            that did navigate often still shows the old URL here and the new
+            one in the next step's url_before. A URL that never moves across a
+            whole run is the signal that a Return submitted nothing.
+        observe_ms:
+          type: integer
+          description: >-
+            Wall time this step spent looking rather than acting. Not counted
+            in the step's ms, the same way a per-step screenshot never was.
     RecipeResponse:
       type: object
       required: [ok, ran, duration_ms, steps]
       properties:
-        ok: { type: boolean }
+        ok:
+          type: boolean
+          description: >-
+            No step returned an error. Not a claim that anything was achieved:
+            a recipe whose taped coordinates have drifted onto another window
+            plays every step without error. Read steps[].observed for what the
+            box actually saw.
         name: { type: string }
+        observe:
+          type: string
+          enum: [input, page]
+          description: >-
+            Echoed from the request, and absent when it was off. Without it a
+            receipt carrying no observed blocks would be ambiguous: the box
+            may have looked and seen nothing, or may never have been asked.
         ran: { type: integer }
         stopped_at: { type: integer, nullable: true }
         duration_ms: { type: integer }
@@ -403,6 +495,7 @@ components:
               ok: { type: boolean }
               ms: { type: integer }
               error: { type: string }
+              observed: { $ref: "#/components/schemas/StepObservation" }
         screenshot: { $ref: "#/components/schemas/Screenshot" }
     Info:
       type: object
