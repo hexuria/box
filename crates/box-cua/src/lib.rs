@@ -7,6 +7,7 @@
 mod cook_record;
 mod encode;
 mod keys;
+mod observe;
 mod recipe;
 mod settle;
 pub(crate) mod x11;
@@ -27,6 +28,7 @@ use tokio::sync::Mutex;
 
 pub use encode::{bgra_to_rgb, bgra_to_rgb_unchecked, encode_png_rgb, zpixmap_to_rgb};
 pub use keys::{char_to_keysym, parse_key_sequence, KeySeq};
+pub use observe::{Focus, FocusState, RecipeObserve, StepObservation, WindowRef};
 pub use recipe::{
     run_recipe, validate_recipe, RecipeArtifact, RecipeRequest, RecipeResponse, RecipeScreenshot,
     RecipeSettle, RecipeStep, RecipeStepResult, MAX_RECIPE_STEPS, MAX_WAIT_MS,

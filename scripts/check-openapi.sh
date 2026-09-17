@@ -48,6 +48,10 @@ if ! grep -q "settle" "${SPEC}"; then
   echo "openapi missing recipe settle" >&2
   missing=1
 fi
+if ! grep -q "StepObservation" "${SPEC}"; then
+  echo "openapi missing recipe step observation" >&2
+  missing=1
+fi
 if ! grep -q "reset_desktop" "${SPEC}"; then
   echo "openapi missing reset_desktop" >&2
   missing=1

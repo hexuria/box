@@ -111,6 +111,14 @@ export type RecipeStep =
 
 export type RecipeSettle = "off" | "compressed" | "raw";
 
+/**
+ * What the receipt reports about the desktop the steps ran against.
+ * `off` (default) adds nothing and costs nothing. `input` adds the window
+ * under each pointer step and the keyboard focus before each type/key.
+ * `page` adds the Chromium page URL either side of click/type/key.
+ */
+export type RecipeObserve = "off" | "input" | "page";
+
 export type RecipeRequest = {
   name?: string;
   stop_on_error?: boolean;
@@ -118,6 +126,7 @@ export type RecipeRequest = {
   record?: boolean;
   artifact_dir?: string;
   settle?: RecipeSettle;
+  observe?: RecipeObserve;
   steps: RecipeStep[];
 };
 
@@ -132,18 +141,62 @@ export type RecipeArtifact = {
   step_index?: number;
 };
 
+/** A window as the guest found it. `id` is the form `/v1/desktop/windows` uses. */
+export type ObservedWindow = {
+  id: string;
+  /** `WM_CLASS` as `instance.class`. */
+  class?: string;
+  /** `_NET_WM_NAME`, falling back to `WM_NAME`. For Chromium, the page title. */
+  title?: string;
+};
+
+/**
+ * `none` means no window held the keyboard focus, so the X server discarded
+ * the keystrokes: the `type` reached nothing at all. `root` is the window
+ * manager parking focus where nothing on this desktop listens.
+ */
+export type FocusState = "none" | "pointer_root" | "root" | "window";
+
+/**
+ * What the guest saw around one step.
+ *
+ * A missing field means the guest looked and got no answer — never that
+ * nothing was there. A missing `observed` on the step means it did not look.
+ */
+export type StepObservation = {
+  /** The window at the step's target coordinate, read before the step ran. */
+  target?: ObservedWindow;
+  /** Where the keys were about to go. `type` and `key` only. */
+  focus?: { state: FocusState; window?: ObservedWindow };
+  url_before?: string;
+  /** Read as soon as the step returned; a navigation is not instant. */
+  url_after?: string;
+  /** Time spent looking rather than acting. Not included in the step's `ms`. */
+  observe_ms: number;
+};
+
 export type RecipeStepResult = {
   index: number;
   op: string;
+  /** No error was returned. Not a claim the step achieved anything. */
   ok: boolean;
   ms: number;
   error?: string;
   screenshot?: ScreenshotResponse;
+  /** Present only when `observe` asked and the step had something to see. */
+  observed?: StepObservation;
 };
 
 export type RecipeResponse = {
+  /** No step returned an error. See `steps[].observed` for what was seen. */
   ok: boolean;
   name?: string;
+  /**
+   * Echoed from the request, absent when it was `off`. Without it, a receipt
+   * with no `observed` blocks could not be told apart from one that never
+   * asked for any.
+   */
+  observe?: Exclude<RecipeObserve, "off">;
   ran: number;
   stopped_at?: number;
   duration_ms: number;

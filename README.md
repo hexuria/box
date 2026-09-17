@@ -65,6 +65,8 @@ curl -fsS http://127.0.0.1:1337/v1/cua/screenshot?format=png \
 
 CUA coordinate space is **1280×800**, origin top-left. Known click/type/key sequences should go in **one** `POST /v1/cua/recipe` (see [RECIPES.md](docs/RECIPES.md)) instead of one HTTP call per action.
 
+A receipt's `ok` means **no step returned an error**, not that the recipe achieved anything: a taped plan whose fixed coordinates have drifted onto another window plays every step cleanly. Ask for `observe: "input"` (or `"page"`) and each step also reports the window it aimed at, where the keys were about to go, and the page URL either side of it, so a caller can tell a run that worked from a run that did not.
+
 Desktop viewer: [http://127.0.0.1:6080/vnc.html](http://127.0.0.1:6080/vnc.html) (loopback publish). Password is `BOX_VNC_PASSWORD` (x11vnc uses the first **8** characters). It is independent of `BOX_TOKEN`. 6080 is **not** Bearer-authenticated — firewall + loopback bind are the control. x11vnc listens on `127.0.0.1:5900` **inside** the container.
 
 ```bash

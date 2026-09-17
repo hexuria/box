@@ -18,8 +18,11 @@ use std::time::{Duration, Instant};
 use arrayvec::ArrayVec;
 use smallvec::SmallVec;
 use x11rb::connection::{Connection, RequestConnection};
+use x11rb::errors::ReplyError;
 use x11rb::image::{BitsPerPixel, Image, ImageOrder};
-use x11rb::protocol::xproto::{self, ConnectionExt as _, KeyButMask, Keycode, Keysym, Window};
+use x11rb::protocol::xproto::{
+    self, Atom, AtomEnum, ConnectionExt as _, KeyButMask, Keycode, Keysym, Window,
+};
 use x11rb::protocol::xtest::{self, ConnectionExt as _};
 use x11rb::rust_connection::RustConnection;
 use x11rb::NONE;
@@ -28,6 +31,7 @@ use crate::encode;
 use crate::keys::{
     char_to_keysym, parse_key_sequence, XK_ALT_L, XK_CONTROL_L, XK_SHIFT_L, XK_SUPER_L,
 };
+use crate::observe::{Focus, FocusState, WindowRef};
 use crate::{CuaConfig, CuaError, CuaPoint, KeyAction, MAX_COLLECTED_POINTS};
 
 /// The XTEST connection and its cached keymap. A `tokio::sync::Mutex`, not
@@ -39,6 +43,17 @@ type XInput = tokio::sync::Mutex<Option<InputState>>;
 
 static INPUT: XInput = XInput::const_new(None);
 static SHOT: Mutex<Option<ShotConn>> = Mutex::new(None);
+
+/// Observation gets its own connection, for the same reason capture has one:
+/// a read the X server is slow to answer must not park the socket the next
+/// keystroke needs.
+///
+/// It is an `InputConn` even though it sends no XTEST, which costs one
+/// version check at connect time and buys the whole deadline, reconnect and
+/// lock-with-a-bound apparatus that `with_native_on` already implements. A
+/// display without XTEST has no working CUA input either, so declining to
+/// observe there loses nothing a caller could have used.
+static OBSERVE: XInput = XInput::const_new(None);
 
 /// How long one XTEST call may wait on the X server before the request is
 /// failed. A healthy round-trip over the guest's unix socket is measured in
@@ -63,6 +78,33 @@ const TYPE_CHAR_BUDGET: Duration = Duration::from_millis(5);
 /// means an earlier call is still parked inside the X server; the wait is
 /// only long enough for one that is finishing right now.
 const INPUT_LOCK_WAIT: Duration = Duration::from_millis(250);
+
+/// How long one observation may wait on the X server.
+///
+/// Far shorter than `XTEST_DEADLINE`, because the two are not worth the same:
+/// a receipt that says "not observed" is still a correct receipt, whereas a
+/// recipe that runs slower because it was watching itself is not. Observation
+/// holds its own connection, so giving up here cannot strand the input path.
+const OBSERVE_DEADLINE: Duration = Duration::from_millis(400);
+
+/// How far the box will walk an X window tree looking for a client window.
+///
+/// The chain under a pointer is root → frame → client → widget, four deep on
+/// this desktop even for Chromium. Sixteen is room for a stranger toolkit and
+/// still a hard bound on the round-trips one observation can cost.
+const MAX_WINDOW_DEPTH: usize = 16;
+
+/// Longest property the box will read, in 4-byte units — 1 KiB, which holds
+/// any `WM_CLASS` and any page title worth putting on a receipt. The bound is
+/// on the X reply, so a window with a pathological title cannot make an
+/// observation expensive.
+const MAX_PROP_WORDS: u32 = 256;
+
+/// `GetInputFocus` answers with a window id, except for two reserved values
+/// the protocol gives special meaning: 0 is *None* (the server discards
+/// keyboard events) and 1 is *PointerRoot* (they follow the pointer).
+const FOCUS_NONE: Window = 0;
+const FOCUS_POINTER_ROOT: Window = 1;
 
 /// What one XTEST attempt did.
 pub(crate) enum Native<T> {
@@ -97,6 +139,11 @@ pub(crate) struct InputConn {
     keysyms: Vec<Keysym>,
     mod_keycodes: Vec<Keycode>,
     root: Window,
+    /// EWMH title atoms, interned once per connection so that reading a
+    /// window's name costs one round-trip rather than three. `NONE` when the
+    /// server would not intern them, which drops the title back to `WM_NAME`.
+    net_wm_name: Atom,
+    utf8_string: Atom,
     min_keycode: Keycode,
     keysyms_per: u8,
     shift_l: Keycode,
@@ -146,6 +193,51 @@ fn lock_shot() -> std::sync::MutexGuard<'static, Option<ShotConn>> {
 
 fn x_err(err: impl std::fmt::Display) -> CuaError {
     CuaError::Tool(format!("x11: {err}"))
+}
+
+/// Intern an atom, or `NONE` if the server would not. A missing atom is not
+/// worth failing a connection over: it only costs the caller a fallback.
+fn intern(conn: &RustConnection, name: &[u8]) -> Atom {
+    conn.intern_atom(false, name)
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+        .map(|reply| reply.atom)
+        .unwrap_or(NONE)
+}
+
+/// The `0x…` form `wmctrl -lx` prints and `GET /v1/desktop/windows` echoes,
+/// so an id on a receipt can be matched against one from either.
+fn window_id(window: Window) -> String {
+    format!("0x{window:08x}")
+}
+
+/// `WM_CLASS` is two NUL-terminated strings, instance then class. `wmctrl`
+/// joins them with a dot and the rest of the box has followed it, so a
+/// receipt reports the same spelling rather than a second one.
+fn format_wm_class(bytes: &[u8]) -> Option<String> {
+    let mut parts = bytes
+        .split(|b| *b == 0)
+        .map(|part| String::from_utf8_lossy(part))
+        .filter(|part| !part.is_empty());
+    let instance = parts.next()?;
+    match parts.next() {
+        Some(class) => Some(format!("{instance}.{class}")),
+        None => Some(instance.into_owned()),
+    }
+}
+
+/// X text properties are NUL-terminated and `WM_NAME` is latin-1, so this is
+/// lossy on purpose. An empty result is reported as absent, because "the
+/// window has no title" and "the title did not come back" must not read the
+/// same way.
+fn prop_text(bytes: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(bytes);
+    let trimmed = text.trim_matches(|c: char| c == '\0' || c.is_whitespace());
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 fn connect_state(dpy: &str) -> InputState {
@@ -369,11 +461,19 @@ impl InputConn {
             .reply()
             .map_err(x_err)?;
         let keycodes_per_mod = mods.keycodes_per_modifier();
+        // Interned rather than looked up, because a fresh X server has not
+        // seen `_NET_WM_NAME` until an EWMH client asks for it, and the box
+        // may connect before Chromium starts. Creating an atom nobody else
+        // has asked for yet is harmless.
+        let net_wm_name = intern(&conn, b"_NET_WM_NAME");
+        let utf8_string = intern(&conn, b"UTF8_STRING");
         let mut this = Self {
             conn,
             keysyms: map.keysyms,
             mod_keycodes: mods.keycodes,
             root,
+            net_wm_name,
+            utf8_string,
             min_keycode,
             keysyms_per: map.keysyms_per_keycode,
             shift_l: 0,
@@ -392,6 +492,166 @@ impl InputConn {
 
     fn lookup_keycode(&self, keysym: Keysym) -> Option<Keycode> {
         self.lookup(keysym).map(|(kc, _)| kc)
+    }
+
+    /// One property's bytes, or `None` when the window does not carry it.
+    ///
+    /// A window can be destroyed between being found and being asked about,
+    /// and that race has to read as "not observed" rather than as a failure:
+    /// `with_native_on` drops the shared connection whenever an op returns
+    /// `Err`, and a window that closed while the box was looking at it is no
+    /// reason to reconnect. A connection-level error still is.
+    fn prop(&self, window: Window, property: Atom, ty: Atom) -> Result<Option<Vec<u8>>, CuaError> {
+        let cookie = self
+            .conn
+            .get_property(false, window, property, ty, 0, MAX_PROP_WORDS)
+            .map_err(x_err)?;
+        match cookie.reply() {
+            Ok(reply) if !reply.value.is_empty() => Ok(Some(reply.value)),
+            Ok(_) => Ok(None),
+            Err(ReplyError::X11Error(_)) => Ok(None),
+            Err(err) => Err(x_err(err)),
+        }
+    }
+
+    fn wm_class(&self, window: Window) -> Result<Option<String>, CuaError> {
+        match self.prop(window, AtomEnum::WM_CLASS.into(), AtomEnum::STRING.into())? {
+            Some(bytes) => Ok(format_wm_class(&bytes)),
+            None => Ok(None),
+        }
+    }
+
+    /// `_NET_WM_NAME` first because it is UTF-8 and is what a window manager
+    /// and Chromium both keep current; `WM_NAME` is the latin-1 fallback for
+    /// an application that sets only the old property.
+    fn wm_title(&self, window: Window) -> Result<Option<String>, CuaError> {
+        if self.net_wm_name != NONE && self.utf8_string != NONE {
+            if let Some(bytes) = self.prop(window, self.net_wm_name, self.utf8_string)? {
+                if let Some(text) = prop_text(&bytes) {
+                    return Ok(Some(text));
+                }
+            }
+        }
+        match self.prop(window, AtomEnum::WM_NAME.into(), AtomEnum::STRING.into())? {
+            Some(bytes) => Ok(prop_text(&bytes)),
+            None => Ok(None),
+        }
+    }
+
+    fn parent_of(&self, window: Window) -> Result<Option<Window>, CuaError> {
+        let cookie = self.conn.query_tree(window).map_err(x_err)?;
+        match cookie.reply() {
+            Ok(reply) => Ok(Some(reply.parent)),
+            Err(ReplyError::X11Error(_)) => Ok(None),
+            Err(err) => Err(x_err(err)),
+        }
+    }
+
+    /// Name a window the way the desktop names it.
+    ///
+    /// `WM_CLASS` and the title live on the *client* window, and neither the
+    /// window under the pointer nor the one holding focus is usually that
+    /// one: a reparenting window manager (xfwm4) puts a frame above it and
+    /// Chromium puts render widgets below it, and neither carries the
+    /// properties. Walking up to the first ancestor that names itself is
+    /// what `xdotool getwindowclassname` does for the same reason.
+    fn look(&self, window: Window) -> Result<WindowRef, CuaError> {
+        let mut probe = window;
+        for _ in 0..MAX_WINDOW_DEPTH {
+            if let Some(class) = self.wm_class(probe)? {
+                return Ok(WindowRef {
+                    id: window_id(probe),
+                    class: Some(class),
+                    title: self.wm_title(probe)?,
+                });
+            }
+            let Some(parent) = self.parent_of(probe)? else {
+                break;
+            };
+            if parent == NONE || parent == self.root {
+                break;
+            }
+            probe = parent;
+        }
+        // Nothing in the ancestry claimed a class. Report the window that was
+        // actually there rather than inventing one, and still try for a title.
+        Ok(WindowRef {
+            id: window_id(window),
+            class: None,
+            title: self.wm_title(window)?,
+        })
+    }
+
+    /// The window covering a screen coordinate, without moving the pointer.
+    ///
+    /// `TranslateCoordinates` is a pure query, so this answers what the click
+    /// is about to land on rather than what it left behind — a click that
+    /// raises or maps a window has already changed the answer by the time it
+    /// returns.
+    pub(crate) fn window_at(&self, x: i32, y: i32) -> Result<Option<WindowRef>, CuaError> {
+        let (x, y) = xy(x, y)?;
+        let mut deepest = self.root;
+        for _ in 0..MAX_WINDOW_DEPTH {
+            let cookie = self
+                .conn
+                .translate_coordinates(self.root, deepest, x, y)
+                .map_err(x_err)?;
+            let child = match cookie.reply() {
+                Ok(reply) => reply.child,
+                // The window went away mid-walk. What the box has so far is
+                // still the truth about where the pointer is going.
+                Err(ReplyError::X11Error(_)) => break,
+                Err(err) => return Err(x_err(err)),
+            };
+            if child == NONE {
+                break;
+            }
+            deepest = child;
+        }
+        if deepest == self.root {
+            // Bare root: nothing is mapped at that coordinate. Absent, not
+            // an empty window.
+            return Ok(None);
+        }
+        self.look(deepest).map(Some)
+    }
+
+    /// Where a keystroke sent right now would be delivered.
+    pub(crate) fn focus(&self) -> Result<Focus, CuaError> {
+        let reply = self
+            .conn
+            .get_input_focus()
+            .map_err(x_err)?
+            .reply()
+            .map_err(x_err)?;
+        match reply.focus {
+            FOCUS_NONE => Ok(Focus {
+                state: FocusState::None,
+                window: None,
+            }),
+            FOCUS_POINTER_ROOT => Ok(Focus {
+                state: FocusState::PointerRoot,
+                window: self.pointer_window()?,
+            }),
+            window if window == self.root => Ok(Focus {
+                state: FocusState::Root,
+                window: None,
+            }),
+            window => Ok(Focus {
+                state: FocusState::Window,
+                window: Some(self.look(window)?),
+            }),
+        }
+    }
+
+    fn pointer_window(&self) -> Result<Option<WindowRef>, CuaError> {
+        let reply = self
+            .conn
+            .query_pointer(self.root)
+            .map_err(x_err)?
+            .reply()
+            .map_err(x_err)?;
+        self.window_at(i32::from(reply.root_x), i32::from(reply.root_y))
     }
 
     /// `(keycode, need_shift)` for a keysym in the current map.
@@ -694,6 +954,39 @@ where
     }
 }
 
+/// Look, and never let looking fail a step.
+///
+/// Observation has no caller waiting on its result the way an actuator does,
+/// so every way it can go wrong collapses to the same answer: the receipt
+/// does not claim the fact. The connection is a parameter for the same
+/// reason `with_native_on` takes one — so a test can wedge one of its own.
+async fn observed<T: Send + 'static>(
+    observe: &'static XInput,
+    config: &CuaConfig,
+    op: impl FnOnce(&mut InputConn) -> Result<Option<T>, CuaError> + Send + 'static,
+) -> Option<T> {
+    match with_native_on(observe, &config.display, OBSERVE_DEADLINE, op).await {
+        Native::Ran(Ok(found)) => found,
+        Native::Ran(Err(err)) => {
+            tracing::debug!(error = %err, "observation failed; the receipt will not claim it");
+            None
+        }
+        Native::Unavailable => None,
+        Native::Wedged(err) => {
+            tracing::warn!(error = %err, "observation gave up on the X server");
+            None
+        }
+    }
+}
+
+pub(crate) async fn observe_window_at(config: &CuaConfig, x: i32, y: i32) -> Option<WindowRef> {
+    observed(&OBSERVE, config, move |c| c.window_at(x, y)).await
+}
+
+pub(crate) async fn observe_focus(config: &CuaConfig) -> Option<Focus> {
+    observed(&OBSERVE, config, |c| c.focus().map(Some)).await
+}
+
 pub(crate) async fn move_pointer(config: &CuaConfig, x: i32, y: i32) -> Result<(), CuaError> {
     let outcome = with_native(&config.display, XTEST_DEADLINE, move |c| c.motion(x, y)).await;
     or_xdotool(outcome, "motion", || async move {
@@ -850,6 +1143,47 @@ async fn xdotool_key(config: &CuaConfig, key: &str, action: KeyAction) -> Result
     }
 }
 
+/// Shapes the box turns X replies into. No X server required.
+#[cfg(test)]
+mod shapes {
+    use super::*;
+
+    #[test]
+    fn wm_class_reads_as_wmctrl_prints_it() {
+        assert_eq!(
+            format_wm_class(b"chromium\0Chromium\0").as_deref(),
+            Some("chromium.Chromium")
+        );
+        // The same spelling `GET /v1/desktop/windows` reports, so a receipt
+        // and a window list can be compared without translating one.
+        assert_eq!(
+            format_wm_class(b"xfce4-panel\0Xfce4-panel\0").as_deref(),
+            Some("xfce4-panel.Xfce4-panel")
+        );
+        // A toolkit that sets only the instance still names itself.
+        assert_eq!(format_wm_class(b"xterm\0").as_deref(), Some("xterm"));
+        assert_eq!(format_wm_class(b"").as_deref(), None);
+        assert_eq!(format_wm_class(b"\0\0").as_deref(), None);
+    }
+
+    #[test]
+    fn window_ids_match_the_form_wmctrl_prints() {
+        assert_eq!(window_id(0x02a0_0003), "0x02a00003");
+        assert_eq!(window_id(0), "0x00000000");
+    }
+
+    #[test]
+    fn a_blank_title_is_absent_not_empty() {
+        assert_eq!(
+            prop_text(b"New Tab - Chromium\0").as_deref(),
+            Some("New Tab - Chromium")
+        );
+        assert_eq!(prop_text(b"\0").as_deref(), None);
+        assert_eq!(prop_text(b"   ").as_deref(), None);
+        assert_eq!(prop_text(b"").as_deref(), None);
+    }
+}
+
 #[cfg(test)]
 mod live {
     use super::*;
@@ -893,6 +1227,38 @@ mod live {
             Native::Wedged(err) => panic!("live display should answer: {err}"),
         }
     }
+
+    /// Needs a real X server, so it skips everywhere the two above do —
+    /// including CI, which starts no display.
+    #[tokio::test]
+    async fn observation_names_the_desktop_it_is_looking_at() {
+        let Some(display) = live_display() else {
+            return;
+        };
+        let mut config = CuaConfig::disabled();
+        config.enabled = true;
+        config.display = display;
+
+        // Whatever is at the centre of the screen, the box must either name a
+        // window or say nothing — never an id with no window behind it.
+        if let Some(found) = observe_window_at(&config, 16, 16).await {
+            assert!(
+                found.id.starts_with("0x"),
+                "window ids are wmctrl-shaped: {found:?}"
+            );
+        }
+
+        let focus = observe_focus(&config)
+            .await
+            .expect("a live server always answers GetInputFocus");
+        // The one thing that must hold: a state naming a window comes with
+        // one, and a state naming nowhere does not invent one.
+        match focus.state {
+            FocusState::Window => assert!(focus.window.is_some(), "{focus:?}"),
+            FocusState::None | FocusState::Root => assert!(focus.window.is_none(), "{focus:?}"),
+            FocusState::PointerRoot => {}
+        }
+    }
 }
 
 /// A paused X server, without an X server.
@@ -906,6 +1272,10 @@ mod deadlines {
     /// Wedging the process-wide `INPUT` would park it for the rest of the
     /// test binary, so this module wedges a connection of its own.
     static TEST_INPUT: XInput = XInput::const_new(None);
+
+    /// And a second one, so wedging the observation path does not wedge the
+    /// input path this module is really about.
+    static TEST_OBSERVE: XInput = XInput::const_new(None);
 
     struct FakeServer {
         display: String,
@@ -1028,6 +1398,39 @@ mod deadlines {
             assert!(Instant::now() < deadline, "never recovered: {err}");
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+    }
+
+    /// A silent X server must cost the receipt a fact, not the recipe a step.
+    #[tokio::test]
+    async fn a_wedged_server_is_not_observed_and_is_not_an_error() {
+        let Some(server) = FakeServer::wedged() else {
+            eprintln!("no writable /tmp/.X11-unix slot; skipping");
+            return;
+        };
+        let mut config = CuaConfig::disabled();
+        config.enabled = true;
+        config.display = server.display();
+
+        let started = Instant::now();
+        let seen = tokio::time::timeout(
+            Duration::from_secs(10),
+            observed(&TEST_OBSERVE, &config, |c| c.window_at(100, 100)),
+        )
+        .await
+        .expect("an observation must return on its own deadline, never hang");
+
+        // Absent, which the receipt renders as "not observed". The step that
+        // follows still runs; nothing about the recipe failed because the box
+        // could not see.
+        assert!(
+            seen.is_none(),
+            "a server that never answered cannot have named a window: {seen:?}"
+        );
+        assert!(
+            started.elapsed() < OBSERVE_DEADLINE * 4,
+            "observation ran past its own deadline: {:?}",
+            started.elapsed()
+        );
     }
 
     fn name<T>(outcome: &Native<T>) -> &'static str {

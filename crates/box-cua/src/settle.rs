@@ -152,7 +152,7 @@ async fn window_viewable(display: &str, id: &str) -> bool {
     }
 }
 
-async fn cdp_json() -> Option<String> {
+pub(crate) async fn cdp_json() -> Option<String> {
     let port: u16 = std::env::var("BOX_CDP_PORT")
         .ok()
         .and_then(|s| s.parse().ok())

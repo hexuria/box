@@ -90,6 +90,8 @@ export type RecipeRequest = {
   record?: boolean;
   artifact_dir?: string;
   settle?: "off" | "compressed" | "raw";
+  /** What the receipt reports about the desktop. Default `off` costs nothing. */
+  observe?: "off" | "input" | "page";
   steps: unknown[];
 };
 
@@ -104,19 +106,44 @@ export type RecipeArtifact = {
   step_index?: number;
 };
 
+export type ObservedWindow = {
+  id?: string;
+  class?: string;
+  title?: string;
+};
+
+/**
+ * What the guest saw around one step. A missing field means it looked and got
+ * no answer; a missing `observed` means it did not look.
+ */
+export type StepObservation = {
+  target?: ObservedWindow;
+  focus?: {
+    state?: "none" | "pointer_root" | "root" | "window";
+    window?: ObservedWindow;
+  };
+  url_before?: string;
+  url_after?: string;
+  observe_ms?: number;
+};
+
 export type RecipeStepResult = {
   index?: number;
   op?: string;
+  /** No error was returned. Not a claim the step achieved anything. */
   ok?: boolean;
   ms?: number;
   error?: string;
   screenshot?: ScreenshotResult;
+  observed?: StepObservation;
 };
 
 /** Guest `POST /v1/cua/recipe` receipt (optional screenshot PNG on the body or a step). */
 export type RecipeReceipt = {
   ok?: boolean;
   name?: string;
+  /** Echoed from the request, absent when it was `off`. */
+  observe?: "input" | "page";
   ran?: number;
   stopped_at?: number;
   duration_ms?: number;

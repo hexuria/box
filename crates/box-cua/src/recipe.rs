@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
 use crate::cook_record::{recording_mime, start_cook_recorder, stop_cook_recorder, CookRecorder};
+use crate::observe::{self, RecipeObserve, StepObservation};
 use crate::settle::{dock_click, page_snap, wait_chromium_usable, wait_page_change};
 use crate::{
     click, double_click, drag, key_inner, move_pointer, press, release_step, screenshot_from_png,
@@ -167,6 +168,13 @@ pub struct RecipeRequest {
     /// Default `off`. Opt in with `compressed` or `raw`. Never launches Chromium.
     #[serde(default)]
     pub settle: Option<RecipeSettle>,
+    /// What the receipt reports about the desktop the steps ran against.
+    /// Default `off`, which produces the receipt this endpoint produced
+    /// before the field existed. `input` adds the window under each pointer
+    /// step and the focus before each `type`; `page` adds the URL either
+    /// side of the steps that can navigate. See `observe.rs`.
+    #[serde(default)]
+    pub observe: Option<RecipeObserve>,
     pub steps: Vec<RecipeStep>,
 }
 
@@ -186,18 +194,32 @@ impl RecipeRequest {
     pub fn settle_mode(&self) -> RecipeSettle {
         self.settle.unwrap_or_default()
     }
+
+    pub fn observe_mode(&self) -> RecipeObserve {
+        self.observe.unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RecipeStepResult {
     pub index: usize,
     pub op: &'static str,
+    /// This step did not return an error. It is not a claim that the step
+    /// achieved anything; `observed` is where the box says what it saw.
     pub ok: bool,
+    /// Time in the step itself and in any `settle` wait after it. Time spent
+    /// observing is not counted here — it is in `observed.observe_ms` — the
+    /// same way a per-step screenshot has never been counted here.
     pub ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub screenshot: Option<ScreenshotResponse>,
+    /// What the box saw around this step. Absent means the box did not look:
+    /// `observe` was `off`, or the step had nothing to look at. Present with
+    /// missing fields means it looked and got no answer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed: Option<StepObservation>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -217,9 +239,19 @@ pub struct RecipeArtifact {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RecipeResponse {
+    /// No step returned an error. Not a claim that the recipe achieved
+    /// anything: see `steps[].observed`.
     pub ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Echoed from the request, and absent when it was `off`.
+    ///
+    /// Without it, a receipt carrying no `observed` blocks is ambiguous: the
+    /// box may have looked and seen nothing, or may never have been asked.
+    /// A receipt is often read a long way from the request that produced it,
+    /// and the whole point here is that a reader should not have to guess.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observe: Option<RecipeObserve>,
     pub ran: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stopped_at: Option<usize>,
@@ -542,6 +574,7 @@ pub async fn run_recipe(
     let stop_on_error = req.stop_on_error();
     let shot_mode = req.screenshot_mode();
     let settle = req.settle_mode();
+    let observe = req.observe_mode();
     let mut steps = Vec::with_capacity(req.steps.len());
     let mut artifacts = Vec::new();
     let mut ok = true;
@@ -550,6 +583,15 @@ pub async fn run_recipe(
     let mut last_key: Option<String> = None;
 
     for (index, step) in req.steps.iter().enumerate() {
+        // Read what the step is about to act on before it acts: a click that
+        // raises a window has already changed what is under the pointer by
+        // the time it returns, and the question the caller has is what the
+        // click landed on.
+        let watch = observe::watch(observe, step);
+        let mut observed = match watch.as_ref() {
+            Some(watch) => Some(watch.before(config).await),
+            None => None,
+        };
         let before_page = match (settle, step) {
             (RecipeSettle::Off, _) => None,
             (_, RecipeStep::Key { key, .. }) if is_return_key(key) => Some(page_snap(config).await),
@@ -571,6 +613,11 @@ pub async fn run_recipe(
             track_key_state(step, &mut ctrl_held, &mut last_key);
         }
         let ms = step_started.elapsed().as_millis() as u64;
+        // After `settle`, so a recipe that already waited for a navigation
+        // gets the page it waited for rather than the one it left.
+        if let (Some(watch), Some(obs)) = (watch.as_ref(), observed.as_mut()) {
+            watch.after(obs).await;
+        }
         match result {
             Ok(()) => {
                 tracing::info!(index, op = step.op_name(), ms, ok = true, "recipe step");
@@ -590,6 +637,7 @@ pub async fn run_recipe(
                                 ms,
                                 error: Some(err.to_string()),
                                 screenshot: None,
+                                observed: observed.take(),
                             });
                             if stop_on_error {
                                 stopped_at = Some(index);
@@ -616,6 +664,7 @@ pub async fn run_recipe(
                     ms,
                     error: None,
                     screenshot,
+                    observed,
                 });
             }
             Err(err) => {
@@ -635,6 +684,7 @@ pub async fn run_recipe(
                     ms,
                     error: Some(err.to_string()),
                     screenshot: None,
+                    observed,
                 });
                 if stop_on_error {
                     stopped_at = Some(index);
@@ -662,6 +712,9 @@ pub async fn run_recipe(
                     ms: 0,
                     error: Some(err.to_string()),
                     screenshot: None,
+                    // The end screenshot is not one of the recipe's steps, so
+                    // there was never anything about it to observe.
+                    observed: None,
                 });
                 stopped_at = Some(steps.len().saturating_sub(1));
             }
@@ -705,6 +758,7 @@ pub async fn run_recipe(
     Ok(RecipeResponse {
         ok,
         name: req.name.clone(),
+        observe: (observe != RecipeObserve::Off).then_some(observe),
         ran: steps.iter().filter(|s| s.ok).count(),
         stopped_at,
         duration_ms,
@@ -1046,6 +1100,116 @@ mod tests {
         let req: RecipeRequest =
             serde_json::from_str(r#"{"steps":[{"op":"wait","ms":1}]}"#).unwrap();
         assert_eq!(req.settle_mode(), RecipeSettle::Off);
+    }
+
+    /// Recipes are stored as immutable JSON and replayed long after they were
+    /// taped. One taped before `observe` existed has to keep meaning what it
+    /// meant, which is: do not observe.
+    #[test]
+    fn a_recipe_taped_before_observe_existed_still_parses_and_observes_nothing() {
+        let stored = r#"{
+            "name": "kabisado",
+            "steps": [
+                {"op": "click", "x": 575, "y": 751},
+                {"op": "wait", "ms": 4158},
+                {"op": "type", "text": "youtube.com"},
+                {"op": "key", "key": "Return"}
+            ]
+        }"#;
+        let req: RecipeRequest = serde_json::from_str(stored).unwrap();
+        assert_eq!(req.observe_mode(), RecipeObserve::Off);
+        assert_eq!(req.steps.len(), 4);
+    }
+
+    #[test]
+    fn parses_observe_modes() {
+        let req: RecipeRequest =
+            serde_json::from_str(r#"{"observe":"page","steps":[{"op":"wait","ms":1}]}"#).unwrap();
+        assert_eq!(req.observe_mode(), RecipeObserve::Page);
+        let req: RecipeRequest =
+            serde_json::from_str(r#"{"observe":"input","steps":[{"op":"wait","ms":1}]}"#).unwrap();
+        assert_eq!(req.observe_mode(), RecipeObserve::Input);
+    }
+
+    /// Existing clients read these receipts. With `observe` off the box must
+    /// not put a single new byte on the wire.
+    #[test]
+    fn a_receipt_without_observation_is_the_receipt_clients_already_parse() {
+        let step = RecipeStepResult {
+            index: 0,
+            op: "click",
+            ok: true,
+            ms: 12,
+            error: None,
+            screenshot: None,
+            observed: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&step).unwrap(),
+            r#"{"index":0,"op":"click","ok":true,"ms":12}"#
+        );
+        let receipt = RecipeResponse {
+            ok: true,
+            name: None,
+            observe: None,
+            ran: 1,
+            stopped_at: None,
+            duration_ms: 12,
+            steps: vec![step],
+            screenshot: None,
+            artifacts: Vec::new(),
+            recording_error: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&receipt).unwrap(),
+            r#"{"ok":true,"ran":1,"duration_ms":12,"steps":[{"index":0,"op":"click","ok":true,"ms":12}]}"#
+        );
+    }
+
+    /// A receipt is read a long way from the request. It has to say whether
+    /// the box was looking, so that no `observed` block cannot be mistaken
+    /// for nothing having been there to see.
+    #[test]
+    fn a_receipt_says_whether_the_box_was_looking() {
+        let receipt = RecipeResponse {
+            ok: true,
+            name: None,
+            observe: Some(RecipeObserve::Input),
+            ran: 0,
+            stopped_at: None,
+            duration_ms: 0,
+            steps: Vec::new(),
+            screenshot: None,
+            artifacts: Vec::new(),
+            recording_error: None,
+        };
+        let json = serde_json::to_string(&receipt).unwrap();
+        assert!(json.contains(r#""observe":"input""#), "{json}");
+    }
+
+    /// And `ok` keeps meaning exactly what it meant: no step returned an
+    /// error. A step that was observed to have landed on nothing is still
+    /// `ok: true`, because the box does not know what the recipe was for.
+    #[test]
+    fn observation_does_not_touch_ok() {
+        let step = RecipeStepResult {
+            index: 6,
+            op: "type",
+            ok: true,
+            ms: 240,
+            error: None,
+            screenshot: None,
+            observed: Some(crate::observe::StepObservation {
+                focus: Some(crate::observe::Focus {
+                    state: crate::observe::FocusState::None,
+                    window: None,
+                }),
+                ..Default::default()
+            }),
+        };
+        let json = serde_json::to_string(&step).unwrap();
+        assert!(json.contains(r#""ok":true"#), "{json}");
+        assert!(json.contains(r#""state":"none""#), "{json}");
     }
 
     #[test]
