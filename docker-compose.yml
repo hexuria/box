@@ -14,9 +14,16 @@ services:
     pids_limit: 1024
     mem_limit: 4g
     shm_size: "256mb"
+    # Secrets arrive as mounted files, not as environment values. A value in
+    # `environment:` lands in pid 1's environ block, which /proc/1/environ
+    # serves to every process in the box for the life of the box, and in
+    # `docker inspect` on the host. Run `bash scripts/write-secrets.sh` first.
+    secrets:
+      - box_token
+      - box_vnc_password
     environment:
-      BOX_TOKEN: ${BOX_TOKEN:?BOX_TOKEN is required}
-      BOX_VNC_PASSWORD: ${BOX_VNC_PASSWORD:?BOX_VNC_PASSWORD is required (x11vnc uses the first 8 characters)}
+      BOX_TOKEN_FILE: /run/secrets/box_token
+      BOX_VNC_PASSWORD_FILE: /run/secrets/box_vnc_password
       BOX_ID: ${BOX_ID:-local-dev}
       RUST_LOG: ${RUST_LOG:-info}
       WORKSPACE_ROOT: /workspace
@@ -44,9 +51,19 @@ services:
       test:
         [
           "CMD-SHELL",
-          "curl -fsS -H \"Authorization: Bearer $$BOX_TOKEN\" http://127.0.0.1:1340/v1/ready",
+          "curl -fsS -H \"Authorization: Bearer $$(cat /run/secrets/box_token)\" http://127.0.0.1:1340/v1/ready",
         ]
       interval: 5s
       timeout: 3s
       retries: 12
       start_period: 25s
+
+# Compose mounts these read-only at /run/secrets/<name>. The mount stays
+# readable by uid 1000 inside the container — that is what lets the healthcheck
+# authenticate — so this hides the token from /proc and from `docker inspect`,
+# not from code already running as the box user. See README §Auth.
+secrets:
+  box_token:
+    file: ./secrets/box_token
+  box_vnc_password:
+    file: ./secrets/box_vnc_password

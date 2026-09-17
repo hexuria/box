@@ -118,6 +118,17 @@ impl GrokBox {
         .await
     }
 
+    /// Stop a running exec and its whole process group.
+    pub async fn exec_cancel(&self, id: &str) -> Result<ExecCancelResponse, Error> {
+        self.send_json(
+            "DELETE",
+            &format!("{}/v1/exec/{}", self.exec_url, urlencoding(id)),
+            None,
+            true,
+        )
+        .await
+    }
+
     pub async fn files_get(&self, path: &str, encoding: Option<&str>) -> Result<Value, Error> {
         let mut url = format!("{}/v1/files?path={}", self.exec_url, urlencoding(path));
         if let Some(encoding) = encoding {
@@ -555,6 +566,11 @@ pub struct ExecResponse {
     pub timed_out: bool,
     pub duration_ms: u64,
     pub truncated: bool,
+    /// Both pipes reached EOF. `false` means a process the command left
+    /// running still holds them and later output was not captured. Defaults to
+    /// `true` so a response from an older guest is not read as incomplete.
+    #[serde(default = "default_true")]
+    pub output_complete: bool,
     pub cwd: String,
     #[serde(default)]
     pub exec_id: String,
@@ -562,6 +578,16 @@ pub struct ExecResponse {
     pub detached: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ExecCancelResponse {
+    pub exec_id: String,
+    pub cancelled: bool,
 }
 
 #[derive(Debug, Serialize)]

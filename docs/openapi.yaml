@@ -82,18 +82,39 @@ components:
         pty: { type: boolean, description: "Not implemented. Returns 400. Use /v1/exec/stream." }
     ExecResponse:
       type: object
-      required: [stdout, stderr, timed_out, duration_ms, truncated, cwd]
+      required:
+        [stdout, stderr, timed_out, duration_ms, truncated, output_complete, cwd]
       properties:
         stdout: { type: string }
         stderr: { type: string }
         exit_code: { type: integer, nullable: true }
         timed_out: { type: boolean }
         duration_ms: { type: integer }
-        truncated: { type: boolean }
+        truncated:
+          type: boolean
+          description: >-
+            The returned output is not everything the command produced: either
+            BOX_MAX_OUTPUT_BYTES was hit, or reading stopped before EOF
+            (output_complete false).
+        output_complete:
+          type: boolean
+          description: >-
+            Both pipes reached EOF before the response was built. False means a
+            process the command left running still holds them, so anything
+            written after the foreground exited was not captured. Use
+            detach=true or /v1/exec/stream for output that outlives the request.
         cwd: { type: string }
         exec_id: { type: string }
         detached: { type: boolean }
         status: { type: string, nullable: true }
+    ExecCancelResponse:
+      type: object
+      required: [exec_id, cancelled]
+      properties:
+        exec_id: { type: string }
+        cancelled:
+          type: boolean
+          description: False when the id is known but the exec had already finished.
     ExecStreamEvent:
       type: object
       properties:
@@ -104,6 +125,7 @@ components:
         timed_out: { type: boolean }
         duration_ms: { type: integer }
         truncated: { type: boolean }
+        output_complete: { type: boolean }
         cwd: { type: string }
     FileGet:
       oneOf:
@@ -264,12 +286,21 @@ components:
       properties:
         service: { type: string }
         uptime_ms: { type: integer }
+        open_fds:
+          type: integer
+          nullable: true
+          description: >-
+            Descriptors this process has open, or null where the platform
+            cannot report them.
         execs:
           type: object
           properties:
             current: { type: integer }
             max: { type: integer }
             started: { type: integer }
+            child_groups:
+              type: integer
+              description: Child process groups the daemon is currently responsible for.
     WindowList:
       type: object
       required: [display, available, windows]
@@ -527,6 +558,30 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ExecResponse" }
+        "404":
+          description: Unknown exec id
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+    delete:
+      tags: [exec]
+      summary: Cancel a running exec and its whole process group
+      description: >-
+        Sends SIGTERM to the exec's process group, then SIGKILL after
+        BOX_EXEC_KILL_GRACE_MS. Works for detached execs and for in-flight ones.
+      security: [{ bearer: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+        - $ref: "#/components/parameters/RequestId"
+      responses:
+        "200":
+          description: Signalled, or the id was known but already finished
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExecCancelResponse" }
         "404":
           description: Unknown exec id
           content:

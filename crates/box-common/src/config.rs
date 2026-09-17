@@ -36,12 +36,21 @@ pub struct BoxConfig {
 pub struct ConfigError(pub String);
 
 impl BoxConfig {
-    /// Load config from the environment, then drop bearer/VNC secrets from
-    /// this process's environ so they are not visible in `/proc/self/environ`.
+    /// Load config from the environment.
+    ///
+    /// Each bearer secret may arrive either as a value (`BOX_TOKEN`) or as a
+    /// path to a file holding it (`BOX_TOKEN_FILE`). The file form is
+    /// preferred and is the only one that keeps the secret out of
+    /// `/proc/<pid>/environ`; see [`wipe_secret_environ`] for why the value
+    /// form cannot be cleaned up after the fact.
     pub fn from_env() -> Result<Self, ConfigError> {
-        let token = crate::env_nonempty("BOX_TOKEN")
-            .ok_or_else(|| ConfigError("BOX_TOKEN must be set and non-empty".into()))?;
-        let host_token = crate::env_nonempty("BOX_HOST_TOKEN").unwrap_or_else(|| token.clone());
+        let token = secret_from_env("BOX_TOKEN")?.ok_or_else(|| {
+            ConfigError(
+                "BOX_TOKEN must be set and non-empty, or BOX_TOKEN_FILE must point at a file containing it"
+                    .into(),
+            )
+        })?;
+        let host_token = secret_from_env("BOX_HOST_TOKEN")?.unwrap_or_else(|| token.clone());
         let exec_bind = parse_addr("BOX_EXEC_BIND", "127.0.0.1:1337");
         let host_bind = parse_addr("BOX_HOST_BIND", "127.0.0.1:1340");
 
@@ -83,15 +92,69 @@ impl BoxConfig {
     }
 }
 
-/// Names removed from the daemon process environment after config load.
+/// Names that carry a secret *value*.
 pub const SECRET_ENV_KEYS: &[&str] = &["BOX_TOKEN", "BOX_HOST_TOKEN", "BOX_VNC_PASSWORD"];
 
-/// Drop secrets from this process's environment. Call after copying values
-/// into memory. Does not affect child processes already spawned.
+/// Names that carry a *path* to a secret. Not secret themselves, but a file
+/// the daemon failed to unlink should not also be advertised.
+pub const SECRET_FILE_ENV_KEYS: &[&str] = &[
+    "BOX_TOKEN_FILE",
+    "BOX_HOST_TOKEN_FILE",
+    "BOX_VNC_PASSWORD_FILE",
+];
+
+/// Remove the secret variables from this process's `getenv` view.
+///
+/// This is **not** a `/proc` defence and never was. `env::remove_var` calls
+/// `unsetenv`, which rewrites the `environ` pointer array but leaves the
+/// original environment block on the process stack — and that block is exactly
+/// what `/proc/<pid>/environ` serves. Anything running as this uid can still
+/// read a value that was passed in through the environment, for the life of
+/// the process. Overwriting the block in place would be unsafe, libc-specific,
+/// and racy against any other thread touching the environment, so this
+/// function does not attempt it.
+///
+/// What it does buy: code in this process, and any library that shells out
+/// without going through the exec daemon's environment filter, cannot pick the
+/// secret up from `getenv`.
+///
+/// To keep a secret out of `/proc/<pid>/environ` it has to never enter the
+/// environment in the first place. Deliver it as `BOX_TOKEN_FILE` /
+/// `BOX_HOST_TOKEN_FILE` / `BOX_VNC_PASSWORD_FILE`; the daemon reads the file
+/// and unlinks it. See README §Auth for the residual exposure.
 pub fn wipe_secret_environ() {
-    for key in SECRET_ENV_KEYS {
+    for key in SECRET_ENV_KEYS.iter().chain(SECRET_FILE_ENV_KEYS.iter()) {
         env::remove_var(key);
     }
+}
+
+/// Read a secret delivered either as `<name>_FILE` (a path) or `<name>` (the
+/// value). The file form wins when both are set.
+///
+/// The file is unlinked once read, so a copy staged on a writable tmpfs stops
+/// being readable as soon as the daemon is up. A read-only secret mount cannot
+/// be unlinked; that failure is logged rather than swallowed, because it is
+/// the difference between "the secret existed for 10 ms" and "the secret is a
+/// `cat` away for the life of the box".
+fn secret_from_env(name: &str) -> Result<Option<String>, ConfigError> {
+    let file_var = format!("{name}_FILE");
+    let Some(path) = crate::env_nonempty(&file_var) else {
+        return Ok(crate::env_nonempty(name));
+    };
+    let raw = std::fs::read_to_string(&path).map_err(|err| {
+        ConfigError(format!(
+            "{file_var} is set to {path} but that file could not be read: {err}"
+        ))
+    })?;
+    if let Err(err) = std::fs::remove_file(&path) {
+        tracing::warn!(
+            var = %file_var,
+            error = %err,
+            "secret file could not be unlinked; it stays readable to anything running as this uid"
+        );
+    }
+    let value = raw.trim().to_string();
+    Ok(if value.is_empty() { None } else { Some(value) })
 }
 
 fn validate_token(
@@ -287,6 +350,71 @@ mod tests {
         assert!(env::var("BOX_TOKEN").is_err());
         assert!(env::var("BOX_HOST_TOKEN").is_err());
         assert!(env::var("BOX_VNC_PASSWORD").is_err());
+    }
+
+    #[test]
+    fn token_file_is_preferred_over_the_value_and_is_unlinked() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let token_path = dir.path().join("box_token");
+        std::fs::write(&token_path, "file-delivered-box-token\n").unwrap();
+        let (_lock, _guard) = isolate(&[
+            ("BOX_TOKEN", Some("env-delivered-box-token")),
+            ("BOX_TOKEN_FILE", Some(token_path.to_str().unwrap())),
+            ("BOX_HOST_TOKEN", None),
+            ("BOX_HOST_TOKEN_FILE", None),
+            ("BOX_VNC_PASSWORD", None),
+            ("BOX_ALLOW_INSECURE_DEV", None),
+            ("BOX_EXEC_BIND", Some("0.0.0.0:1337")),
+            ("BOX_HOST_BIND", Some("0.0.0.0:1340")),
+            ("WORKSPACE_ROOT", Some("/tmp")),
+        ]);
+        let config = BoxConfig::from_env().unwrap();
+        assert_eq!(config.token, "file-delivered-box-token");
+        assert_eq!(config.host_token, "file-delivered-box-token");
+        assert!(
+            !token_path.exists(),
+            "the daemon must unlink a secret file it can write to"
+        );
+        assert!(env::var("BOX_TOKEN_FILE").is_err());
+    }
+
+    #[test]
+    fn host_token_file_can_differ_from_the_box_token_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let token_path = dir.path().join("box_token");
+        let host_path = dir.path().join("host_token");
+        std::fs::write(&token_path, "file-delivered-box-token").unwrap();
+        std::fs::write(&host_path, "file-delivered-host-token").unwrap();
+        let (_lock, _guard) = isolate(&[
+            ("BOX_TOKEN", None),
+            ("BOX_TOKEN_FILE", Some(token_path.to_str().unwrap())),
+            ("BOX_HOST_TOKEN", None),
+            ("BOX_HOST_TOKEN_FILE", Some(host_path.to_str().unwrap())),
+            ("BOX_VNC_PASSWORD", None),
+            ("BOX_ALLOW_INSECURE_DEV", None),
+            ("BOX_EXEC_BIND", Some("0.0.0.0:1337")),
+            ("BOX_HOST_BIND", Some("0.0.0.0:1340")),
+            ("WORKSPACE_ROOT", Some("/tmp")),
+        ]);
+        let config = BoxConfig::from_env().unwrap();
+        assert_eq!(config.token, "file-delivered-box-token");
+        assert_eq!(config.host_token, "file-delivered-host-token");
+    }
+
+    #[test]
+    fn unreadable_token_file_fails_instead_of_falling_back_to_the_env_value() {
+        let (_lock, _guard) = isolate(&[
+            ("BOX_TOKEN", Some("env-delivered-box-token")),
+            ("BOX_TOKEN_FILE", Some("/nonexistent/box_token")),
+            ("BOX_HOST_TOKEN", None),
+            ("BOX_HOST_TOKEN_FILE", None),
+            ("BOX_VNC_PASSWORD", None),
+            ("BOX_ALLOW_INSECURE_DEV", None),
+            ("BOX_EXEC_BIND", Some("127.0.0.1:1337")),
+            ("BOX_HOST_BIND", Some("127.0.0.1:1340")),
+        ]);
+        let err = BoxConfig::from_env().unwrap_err();
+        assert!(err.0.contains("BOX_TOKEN_FILE"), "{err}");
     }
 
     #[test]

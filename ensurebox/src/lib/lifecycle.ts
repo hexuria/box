@@ -112,8 +112,6 @@ export async function createBox(name?: string): Promise<PublicBox> {
   await writeFs(
     envFile,
     [
-      `BOX_TOKEN=${boxToken}`,
-      `BOX_VNC_PASSWORD=${vncPassword}`,
       `BOX_ID=${id}`,
       "BOX_DESKTOP=1",
       "BOX_DESKTOP_REQUIRED=1",
@@ -123,6 +121,19 @@ export async function createBox(name?: string): Promise<PublicBox> {
     ].join("\n"),
     { mode: 0o600 },
   );
+
+  // Secrets go in as read-only mounts, not through --env-file. Anything in the
+  // container environment shows up in `docker inspect` on the host and in
+  // /proc/1/environ inside the box, where a compromised Chromium renderer
+  // (which runs --no-sandbox as the same uid) can read it. Mode 0644 inside a
+  // 0700 directory: the directory keeps other host users out, the file mode is
+  // what lets the container's uid 1000 read the bind mount.
+  const secretsDir = path.join(DATA_DIR, "volumes", id, "secrets");
+  await mkdir(secretsDir, { recursive: true, mode: 0o700 });
+  const tokenFile = path.join(secretsDir, "box_token");
+  const vncFile = path.join(secretsDir, "box_vnc_password");
+  await writeFs(tokenFile, boxToken, { mode: 0o644 });
+  await writeFs(vncFile, vncPassword, { mode: 0o644 });
 
   const record: BoxRecord = {
     id,
@@ -155,6 +166,14 @@ export async function createBox(name?: string): Promise<PublicBox> {
       "256m",
       "--env-file",
       envFile,
+      "-e",
+      "BOX_TOKEN_FILE=/run/secrets/box_token",
+      "-e",
+      "BOX_VNC_PASSWORD_FILE=/run/secrets/box_vnc_password",
+      "-v",
+      `${tokenFile}:/run/secrets/box_token:ro`,
+      "-v",
+      `${vncFile}:/run/secrets/box_vnc_password:ro`,
       "-p",
       `${BIND_HOST}:${record.ports.exec}:1337`,
       "-p",

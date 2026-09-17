@@ -64,19 +64,48 @@ Run a process. `cwd` defaults to the workspace root and is jail-checked.
   "timed_out": false,
   "duration_ms": 4,
   "truncated": false,
+  "output_complete": true,
   "cwd": "/workspace"
 }
 ```
 
-On timeout: `timed_out: true`; the process group gets **SIGTERM**, then **SIGKILL** after `BOX_EXEC_KILL_GRACE_MS` (default 2s). `exit_code` is the wait status if the child dies on SIGTERM (often 143) or `null` if SIGKILL was required. **Captured stdout/stderr are kept.** Output streams are capped (`BOX_MAX_OUTPUT_BYTES`, default 8 MiB); `truncated` is true if a cap hit. After writing `stdin`, the pipe is closed so the child sees EOF. `BOX_TOKEN`, `BOX_HOST_TOKEN`, and `BOX_VNC_PASSWORD` are stripped from the child environment. The daemons also drop those variables from their own process environ after loading config.
+On timeout: `timed_out: true`; the process group gets **SIGTERM**, then **SIGKILL** after `BOX_EXEC_KILL_GRACE_MS` (default 2s). `exit_code` is the wait status if the child dies on SIGTERM (often 143) or `null` if SIGKILL was required. **Captured stdout/stderr are kept.** Output streams are capped (`BOX_MAX_OUTPUT_BYTES`, default 8 MiB); `truncated` is true if a cap hit. After writing `stdin`, the pipe is closed so the child sees EOF. `BOX_TOKEN`, `BOX_HOST_TOKEN`, `BOX_VNC_PASSWORD`, and their `_FILE` forms are stripped from the child environment.
+
+#### Commands that leave something running
+
+A backgrounded process inherits the write ends of stdout and stderr, so those pipes never reach EOF. Once the direct child exits, the daemon collects what is already buffered and stops reading; it does not wait for an EOF that is not coming.
+
+- `output_complete: false` — a process the command left running still holds the pipes. Everything the foreground wrote is in `stdout` / `stderr`; anything written **after** the foreground exited was not captured.
+- `truncated` is `true` whenever `output_complete` is `false`, so a caller that only looks at `truncated` is not told the output is whole when it is not.
+
+```bash
+curl -fsS "$EXEC/v1/exec" -H "Authorization: Bearer $BOX_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"command":"echo A; (sleep 300 &); echo B"}'
+# {"stdout":"A\nB\n", ..., "truncated":true, "output_complete":false}
+```
+
+To run something that outlives the request, use `detach: true` and poll `GET /v1/exec/{id}`, or stream it with `POST /v1/exec/stream`. To stop it, `DELETE /v1/exec/{id}`.
 
 Default timeout 30s; max 10 minutes (`BOX_DEFAULT_TIMEOUT_MS`, `BOX_MAX_TIMEOUT_MS`). Concurrent execs are capped (`BOX_MAX_CONCURRENT_EXECS`, default **8**); extra calls return **429** `busy`. On timeout the process group gets **SIGTERM**, then **SIGKILL** after `BOX_EXEC_KILL_GRACE_MS` (default 2s). Responses include `exec_id`.
 
 `pty: true` is **not implemented** (400). Use `POST /v1/exec/stream` for incremental stdout/stderr.
 
+### `DELETE /v1/exec/{id}`
+
+Stop a running exec. Sends **SIGTERM** to its whole process group, then **SIGKILL** after `BOX_EXEC_KILL_GRACE_MS`. Works for a detached exec (whose id comes back immediately) and for an in-flight one.
+
+```json
+{ "exec_id": "exec-…", "cancelled": true }
+```
+
+`cancelled: false` means the id is known but the exec had already finished. Unknown ids return **404**. An in-flight `POST /v1/exec` that is cancelled this way still answers its own request: `timed_out` stays `false` and `exit_code` is the signal-terminated status (usually `null`), because the command did not run out of time — it was stopped.
+
+Dropping the HTTP connection also terminates the process group — for `/v1/exec` and for `/v1/exec/stream` — so a cancelled turn does not strand a process tree. That is a side effect of hanging up, though; `DELETE` is the way to say it on purpose.
+
 ### `POST /v1/exec/stream`
 
-Same body as `/v1/exec`. Response is `application/x-ndjson` (or SSE if `Accept: text/event-stream`): `stdout` / `stderr` chunks, then `{ "type": "exit", ... }`.
+Same body as `/v1/exec`. Response is `application/x-ndjson` (or SSE if `Accept: text/event-stream`): `stdout` / `stderr` chunks, then `{ "type": "exit", ... }`. The exit event carries the same `truncated` and `output_complete` flags as `/v1/exec`.
 
 Optional `detach: true` on `/v1/exec` returns immediately with `status: "running"`; poll `GET /v1/exec/{id}`.
 

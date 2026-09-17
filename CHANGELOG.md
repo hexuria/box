@@ -38,6 +38,15 @@ Guest honesty and wire parity against BOX-REVIEW P0 → P1 (selective P2). Basel
 | `BOX_DISPLAY_GEOM` already drives CUA coords; added a regression test | `crates/box-cua` |
 | Did **not** vendor trycua | — |
 
+## Exec lifecycle and secret delivery (#12, #13, #14, #15)
+
+| Item | Where |
+| --- | --- |
+| Background-spawning exec returns the foreground output instead of an empty body; new `output_complete`, and `truncated` is true whenever EOF was not observed (#13) | `crates/box-exec/src/exec.rs`, openapi, API.md, SDKs |
+| Pipe readers are owned by the request, not detached tasks — no descriptor or task leak; `open_fds` on `/v1/metrics` (#14) | `crates/box-exec/src/exec.rs`, `src/fdcount.rs`, `/v1/metrics` |
+| One `ChildGuard` owns the process group, so timeout, disconnect and explicit cancel all SIGTERM → SIGKILL the group; `DELETE /v1/exec/{id}`; `execs.child_groups` on `/v1/metrics` (#15) | `crates/box-exec`, openapi, API.md, SDKs, CLI |
+| Secrets delivered as files (`BOX_TOKEN_FILE`, `BOX_HOST_TOKEN_FILE`, `BOX_VNC_PASSWORD_FILE`), read and unlinked; Compose and EnsureBox mount instead of exporting; `wipe_secret_environ` doc corrected to what `unsetenv` actually does (#12) | `crates/box-common/src/config.rs`, `docker/entrypoint.sh`, `docker-compose.yml`, `ensurebox`, README, ARCHITECTURE, DEPLOY |
+
 ## Deferred
 
 - PTY exec (use `/v1/exec/stream`)

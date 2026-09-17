@@ -17,7 +17,7 @@ pub fn app(state: AppState) -> Router {
     let protected = Router::new()
         .route("/v1/exec", post(exec::handle))
         .route("/v1/exec/stream", post(exec::handle_stream))
-        .route("/v1/exec/{id}", get(exec::status))
+        .route("/v1/exec/{id}", get(exec::status).delete(exec::cancel))
         .route(
             "/v1/files",
             get(files::get).put(files::put).delete(files::delete),

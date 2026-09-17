@@ -56,6 +56,14 @@ if ! grep -q "x-request-id" "${SPEC}"; then
   echo "openapi missing x-request-id" >&2
   missing=1
 fi
+if ! grep -q "output_complete" "${SPEC}"; then
+  echo "openapi missing exec output_complete" >&2
+  missing=1
+fi
+if ! grep -q "ExecCancelResponse" "${SPEC}"; then
+  echo "openapi missing DELETE /v1/exec/{id} response" >&2
+  missing=1
+fi
 
 if [[ "${missing}" != "0" ]]; then
   exit 1

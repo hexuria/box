@@ -7,6 +7,7 @@
 mod control;
 mod cua;
 mod exec;
+mod fdcount;
 mod files;
 mod middleware;
 mod routes;
@@ -26,6 +27,12 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 
 pub use routes::app;
+
+/// `exec_id` → process group id for every child this daemon currently owns.
+///
+/// A `std::sync::Mutex` rather than the async one on purpose: the guard that
+/// keeps this table honest has to deregister from `Drop`, which cannot await.
+pub type ChildGroups = Arc<std::sync::Mutex<HashMap<String, i32>>>;
 
 #[cfg(test)]
 mod tests;
@@ -49,6 +56,7 @@ pub struct AppState {
     pub shutting_down: Arc<AtomicBool>,
     pub started_at: Instant,
     pub jobs: Arc<Mutex<HashMap<String, DetachedJob>>>,
+    pub child_groups: ChildGroups,
 }
 
 #[derive(Clone, Debug)]
@@ -79,6 +87,7 @@ impl AppState {
             shutting_down: Arc::new(AtomicBool::new(false)),
             started_at: Instant::now(),
             jobs: Arc::new(Mutex::new(HashMap::new())),
+            child_groups: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -102,6 +111,7 @@ impl AppState {
             shutting_down: Arc::new(AtomicBool::new(false)),
             started_at: Instant::now(),
             jobs: Arc::new(Mutex::new(HashMap::new())),
+            child_groups: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 }

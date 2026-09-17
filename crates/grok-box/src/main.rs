@@ -51,6 +51,8 @@ enum Commands {
     },
     /// GET /v1/exec/{id} (detached job)
     ExecStatus { id: String },
+    /// DELETE /v1/exec/{id} (stop the exec and its process group)
+    ExecCancel { id: String },
     #[command(subcommand)]
     Files(FilesCmd),
     /// GET host /v1/desktop
@@ -236,6 +238,7 @@ async fn main() -> Result<()> {
             }
         }
         Commands::ExecStatus { id } => print_json(&box_client.exec_status(&id).await?)?,
+        Commands::ExecCancel { id } => print_json(&box_client.exec_cancel(&id).await?)?,
         Commands::Files(cmd) => match cmd {
             FilesCmd::Get {
                 path,
