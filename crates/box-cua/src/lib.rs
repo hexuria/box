@@ -41,6 +41,20 @@ const CLICK_GAP: Duration = Duration::from_millis(12);
 /// Openbox starts a move grab after ButtonPress; a same-invocation warp is
 /// often dropped. Live press→release from L1 already has a human-scale gap.
 const DRAG_GRAB: Duration = Duration::from_millis(20);
+/// How long a verb waits for the actuator before giving up on it.
+///
+/// `ACTUATOR` protects a *gesture*, not a single X request: press, gap,
+/// release is one click, and another verb's motion spliced into the middle
+/// of it is not a click. That sequence genuinely cannot be interrupted —
+/// cancelling it half-way would leave a mouse button held down — so the
+/// lock stays held across the whole gesture and the bound comes from the
+/// per-call `XTEST_DEADLINE` instead: every step now fails in bounded time,
+/// so the hold is bounded too. The worst of them is `double_click`, three
+/// XTEST deadlines plus its two gaps, about 6.1s. Ten seconds clears that
+/// and still turns a stuck desk into a 503 rather than a queue that never
+/// drains. A bulk `type` of thousands of characters can outlast it; a
+/// caller racing one gets 503 and can retry.
+const ACTUATOR_WAIT: Duration = Duration::from_secs(10);
 pub(crate) const MAX_MOTION_PATH: usize = 64;
 /// `drag_waypoints` plus a release path plus one extra coordinate.
 pub(crate) const MAX_COLLECTED_POINTS: usize = MAX_MOTION_PATH + MAX_DRAG_WAYPOINTS;
@@ -65,7 +79,10 @@ pub async fn warmup_pointer(config: &CuaConfig) {
             continue;
         }
         let started = Instant::now();
-        let _g = ACTUATOR.lock().await;
+        let Ok(_g) = lock_actuator(config).await else {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue;
+        };
         // Off-center: Xvfb's default pointer is (width/2, height/2), not (0,0).
         match x11::move_pointer(config, 16, 16).await {
             Ok(()) => {
@@ -84,6 +101,31 @@ pub async fn warmup_pointer(config: &CuaConfig) {
         }
     }
     tracing::warn!("cua pointer warmup gave up; first click may be slow");
+}
+
+/// Take the actuator, or report that the desk is stuck.
+///
+/// `DisplayDown` maps to 503 in `box-exec`. A caller that waited this long
+/// behind a gesture is not looking at a request that failed; it is looking
+/// at a display that is not usable right now.
+async fn lock_actuator(
+    config: &CuaConfig,
+) -> Result<tokio::sync::MutexGuard<'static, ()>, CuaError> {
+    match tokio::time::timeout(ACTUATOR_WAIT, ACTUATOR.lock()).await {
+        Ok(guard) => Ok(guard),
+        Err(_) => {
+            tracing::error!(
+                display = %config.display,
+                ms = ACTUATOR_WAIT.as_millis() as u64,
+                "cua actuator is still held; refusing to queue"
+            );
+            Err(CuaError::DisplayDown(format!(
+                "{} (actuator held for more than {}ms)",
+                config.display,
+                ACTUATOR_WAIT.as_millis()
+            )))
+        }
+    }
 }
 
 /// Capability flag name advertised by `box-host`.
@@ -337,7 +379,7 @@ pub async fn click(config: &CuaConfig, req: &ClickRequest) -> Result<OkResponse,
     ensure_ready(config)?;
     validate_point(config, req.x, req.y)?;
     let button = validate_button(req.button)?;
-    let _g = ACTUATOR.lock().await;
+    let _g = lock_actuator(config).await?;
     x11::pointer_press(config, req.x, req.y, button).await?;
     tokio::time::sleep(CLICK_GAP).await;
     x11::button_up(config, button).await?;
@@ -348,7 +390,7 @@ pub async fn press(config: &CuaConfig, req: &ClickRequest) -> Result<OkResponse,
     ensure_ready(config)?;
     validate_point(config, req.x, req.y)?;
     let button = validate_button(req.button)?;
-    let _g = ACTUATOR.lock().await;
+    let _g = lock_actuator(config).await?;
     x11::pointer_press(config, req.x, req.y, button).await?;
     Ok(OkResponse { ok: true })
 }
@@ -390,7 +432,7 @@ pub(crate) async fn release_step(
         (Some(px), Some(py)) => Some((px, py)),
         _ => None,
     };
-    let _g = ACTUATOR.lock().await;
+    let _g = lock_actuator(config).await?;
     release_inner(config, extra, path, button).await
 }
 
@@ -402,6 +444,8 @@ pub(crate) async fn release_inner(
 ) -> Result<OkResponse, CuaError> {
     match x11::motion_path_and_release(config, &[], extra, path, button).await {
         Ok(()) => {}
+        // xdotool drives the same X server, so a wedge is not retryable.
+        Err(err @ CuaError::DisplayDown(_)) => return Err(err),
         Err(_) => {
             xdotool::xdotool_owned(config, &pointer_release_args(path, extra, button)).await?;
         }
@@ -424,7 +468,7 @@ pub(crate) async fn type_text_inner(
     if text.len() > 16 * 1024 {
         return Err(CuaError::Invalid("text is too long".into()));
     }
-    let _g = ACTUATOR.lock().await;
+    let _g = lock_actuator(config).await?;
     x11::type_text(config, text).await?;
     Ok(OkResponse { ok: true })
 }
@@ -440,7 +484,7 @@ pub(crate) async fn key_inner(
 ) -> Result<OkResponse, CuaError> {
     ensure_ready(config)?;
     validate_key(key)?;
-    let _g = ACTUATOR.lock().await;
+    let _g = lock_actuator(config).await?;
     x11::key(config, key, action).await?;
     Ok(OkResponse { ok: true })
 }
@@ -451,7 +495,7 @@ pub async fn scroll(config: &CuaConfig, req: &ScrollRequest) -> Result<OkRespons
     if req.dx == 0 && req.dy == 0 {
         return Err(CuaError::Invalid("dx and dy must not both be 0".into()));
     }
-    let _g = ACTUATOR.lock().await;
+    let _g = lock_actuator(config).await?;
     x11::scroll(config, req.x, req.y, req.dx, req.dy).await?;
     Ok(OkResponse { ok: true })
 }
@@ -460,7 +504,7 @@ pub async fn double_click(config: &CuaConfig, req: &ClickRequest) -> Result<OkRe
     ensure_ready(config)?;
     validate_point(config, req.x, req.y)?;
     let button = validate_button(req.button)?;
-    let _g = ACTUATOR.lock().await;
+    let _g = lock_actuator(config).await?;
     x11::pointer_press(config, req.x, req.y, button).await?;
     tokio::time::sleep(CLICK_GAP).await;
     x11::button_up(config, button).await?;
@@ -472,7 +516,7 @@ pub async fn double_click(config: &CuaConfig, req: &ClickRequest) -> Result<OkRe
 pub async fn move_pointer(config: &CuaConfig, req: &MoveRequest) -> Result<OkResponse, CuaError> {
     ensure_ready(config)?;
     validate_point(config, req.x, req.y)?;
-    let _g = ACTUATOR.lock().await;
+    let _g = lock_actuator(config).await?;
     x11::move_pointer(config, req.x, req.y).await?;
     Ok(OkResponse { ok: true })
 }
@@ -483,13 +527,15 @@ pub async fn drag(config: &CuaConfig, req: &DragRequest) -> Result<OkResponse, C
     validate_point(config, req.x2, req.y2)?;
     let button = validate_button(req.button)?;
     let points = drag_waypoints(req.x1, req.y1, req.x2, req.y2);
-    let _g = ACTUATOR.lock().await;
+    let _g = lock_actuator(config).await?;
     // SAFETY: `drag_waypoints` always emits at least the start point.
     let (x1, y1) = unsafe { *points.get_unchecked(0) };
     x11::pointer_press(config, x1, y1, button).await?;
     tokio::time::sleep(DRAG_GRAB).await;
     match x11::motion_path_and_release(config, &points[1..], None, None, button).await {
         Ok(()) => {}
+        // xdotool drives the same X server, so a wedge is not retryable.
+        Err(err @ CuaError::DisplayDown(_)) => return Err(err),
         Err(_) => {
             let mut args = SmallVec::<[String; 16]>::new();
             for &(x, y) in points.iter().skip(1) {
@@ -743,5 +789,23 @@ mod tests {
 
     fn futures_error(cfg: &CuaConfig) -> CuaError {
         ensure_ready(cfg).unwrap_err()
+    }
+
+    /// Time is paused, so this asserts the shape of the wait, not its length.
+    #[tokio::test(start_paused = true)]
+    async fn actuator_refuses_to_queue_forever() {
+        let mut cfg = CuaConfig::disabled();
+        cfg.enabled = true;
+        let held = ACTUATOR.lock().await;
+        let err = lock_actuator(&cfg)
+            .await
+            .expect_err("a held actuator must expire, not queue");
+        // 503, not 502: the desk is stuck, the request was not malformed.
+        assert!(matches!(err, CuaError::DisplayDown(_)), "got {err:?}");
+        drop(held);
+        assert!(
+            lock_actuator(&cfg).await.is_ok(),
+            "released lock is takeable"
+        );
     }
 }

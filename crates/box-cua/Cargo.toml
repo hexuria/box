@@ -30,7 +30,9 @@ mimalloc = ["dep:mimalloc"]
 
 [dev-dependencies]
 serde_json = { workspace = true }
-tokio = { workspace = true }
+# `test-util` pauses the clock so the actuator-wait test asserts the shape of
+# the timeout without spending ten seconds of wall clock on it.
+tokio = { workspace = true, features = ["test-util"] }
 criterion = { workspace = true }
 bumpalo = { version = "3.16", features = ["collections"] }
 
