@@ -776,10 +776,18 @@ async fn run_step(config: &CuaConfig, step: &RecipeStep) -> Result<(), CuaError>
             .await?;
         }
         RecipeStep::Type { text } => {
-            for ch in text.chars() {
+            let total = text.chars().count();
+            for (typed, ch) in text.chars().enumerate() {
                 let mut buf = [0u8; 4];
                 let piece = ch.encode_utf8(&mut buf);
-                type_text_inner(config, piece).await?;
+                if let Err(err) = type_text_inner(config, piece).await {
+                    // `mundo` arriving as `mu` is the failure this reports.
+                    // The step result is all the caller gets, so it has to
+                    // say how much of the string reached the X server.
+                    return Err(CuaError::Tool(format!(
+                        "type stopped after {typed} of {total} characters: {err}"
+                    )));
+                }
                 tokio::time::sleep(std::time::Duration::from_millis(TYPE_CHAR_MS)).await;
             }
         }

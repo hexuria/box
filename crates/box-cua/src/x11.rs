@@ -4,9 +4,16 @@
 //! stall clicks. The async `ACTUATOR` mutex in `lib.rs` still serializes
 //! pointer gestures (click gap, drag grab); it is never held across
 //! screenshot work.
+//!
+//! Both paths are blocking X11 round-trips, so both run on `spawn_blocking`
+//! rather than on a tokio worker. Input additionally carries a deadline:
+//! x11rb has no reply deadline of its own, and input runs while `lib.rs`
+//! holds `ACTUATOR`, so a wedged or paused X server would otherwise park a
+//! worker for as long as the server stays quiet and leave every later CUA
+//! request queued behind a lock that is never released.
 
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use arrayvec::ArrayVec;
 use smallvec::SmallVec;
@@ -23,8 +30,53 @@ use crate::keys::{
 };
 use crate::{CuaConfig, CuaError, CuaPoint, KeyAction, MAX_COLLECTED_POINTS};
 
-static INPUT: Mutex<Option<InputState>> = Mutex::new(None);
+/// The XTEST connection and its cached keymap. A `tokio::sync::Mutex`, not
+/// a `std::sync::Mutex`, so that *acquiring* it can carry a deadline: a
+/// worker parked inside a wedged X server keeps this guard until the server
+/// answers, and every other caller has to learn that in bounded time rather
+/// than queue behind it.
+type XInput = tokio::sync::Mutex<Option<InputState>>;
+
+static INPUT: XInput = XInput::const_new(None);
 static SHOT: Mutex<Option<ShotConn>> = Mutex::new(None);
+
+/// How long one XTEST call may wait on the X server before the request is
+/// failed. A healthy round-trip over the guest's unix socket is measured in
+/// microseconds (`benches/hotpath.rs`: 1.6 µs for motion+flush, 4 ms for a
+/// whole 1280×800 screenshot), so two seconds is three orders of magnitude
+/// of headroom for a merely busy server while still bounding a wedged one
+/// to something a caller can retry. It also sits under the 2.5 s
+/// `XDOTOOL_TIMEOUT`, so a native attempt plus its fork/exec fallback still
+/// fit inside one HTTP request.
+const XTEST_DEADLINE: Duration = Duration::from_millis(2_000);
+
+/// Added to `XTEST_DEADLINE` per character of `type`, because one call types
+/// the whole string and a keysym that is missing from the keymap costs a
+/// GetKeyboardMapping round-trip and a MappingNotify to every X client for
+/// that one character. 5 ms each is ~1000× the mapped path and ~50× a
+/// scratch remap, so a long non-Latin paste keeps working and a wedged
+/// server still fails.
+const TYPE_CHAR_BUDGET: Duration = Duration::from_millis(5);
+
+/// How long a caller waits for the XTEST connection itself. `lib.rs` already
+/// serializes every CUA verb behind `ACTUATOR`, so finding this lock held
+/// means an earlier call is still parked inside the X server; the wait is
+/// only long enough for one that is finishing right now.
+const INPUT_LOCK_WAIT: Duration = Duration::from_millis(250);
+
+/// What one XTEST attempt did.
+pub(crate) enum Native<T> {
+    /// The server answered. `Err` is a protocol or socket failure, which is
+    /// worth retrying through xdotool.
+    Ran(Result<T, CuaError>),
+    /// XTEST is not usable on this display; the caller must use xdotool.
+    Unavailable,
+    /// The server did not answer inside the deadline, or an earlier call is
+    /// still parked inside it. xdotool drives the same server and would only
+    /// spend its own timeout learning that, so callers report this instead
+    /// of falling back.
+    Wedged(CuaError),
+}
 
 struct InputState {
     display: String,
@@ -81,8 +133,11 @@ impl Drop for MappingGuard<'_> {
     }
 }
 
-fn lock_input() -> std::sync::MutexGuard<'static, Option<InputState>> {
-    INPUT.lock().unwrap_or_else(|e| e.into_inner())
+/// `DisplayDown`, not `Tool`: `box-exec` maps it to 503 `display_unavailable`,
+/// which is what "the X server stopped answering" means. `Tool` is a 502 and
+/// reads like the input landed and did nothing.
+fn wedged(dpy: &str, detail: &str) -> CuaError {
+    CuaError::DisplayDown(format!("{dpy} ({detail})"))
 }
 
 fn lock_shot() -> std::sync::MutexGuard<'static, Option<ShotConn>> {
@@ -93,13 +148,8 @@ fn x_err(err: impl std::fmt::Display) -> CuaError {
     CuaError::Tool(format!("x11: {err}"))
 }
 
-/// Run `op` on a live XTEST connection. `None` means use the CLI fallback.
-pub(crate) fn with_native<T>(
-    dpy: &str,
-    op: impl FnOnce(&mut InputConn) -> Result<T, CuaError>,
-) -> Option<Result<T, CuaError>> {
-    let mut guard = lock_input();
-    let state = guard.get_or_insert_with(|| match InputConn::connect(dpy) {
+fn connect_state(dpy: &str) -> InputState {
+    match InputConn::connect(dpy) {
         Ok(conn) => {
             tracing::info!(display = dpy, "cua xtest connected");
             InputState {
@@ -114,28 +164,78 @@ pub(crate) fn with_native<T>(
                 backend: Backend::Cli,
             }
         }
-    });
-    if state.display != dpy {
-        *state = match InputConn::connect(dpy) {
-            Ok(conn) => InputState {
-                display: dpy.to_string(),
-                backend: Backend::Native(conn),
-            },
-            Err(_) => InputState {
-                display: dpy.to_string(),
-                backend: Backend::Cli,
-            },
-        };
     }
-    match &mut state.backend {
-        Backend::Cli => None,
-        Backend::Native(conn) => {
-            let result = op(conn);
-            if result.is_err() {
-                // Drop a broken socket so the next call reconnects (or falls back).
-                *guard = None;
+}
+
+/// Run `op` on a live XTEST connection, off the tokio workers the way the
+/// screenshot path already is, and inside `budget`.
+pub(crate) async fn with_native<T: Send + 'static>(
+    dpy: &str,
+    budget: Duration,
+    op: impl FnOnce(&mut InputConn) -> Result<T, CuaError> + Send + 'static,
+) -> Native<T> {
+    with_native_on(&INPUT, dpy, budget, op).await
+}
+
+/// The connection is a parameter so a test can wedge one of its own instead
+/// of parking the process-wide connection for every later call.
+async fn with_native_on<T: Send + 'static>(
+    input: &'static XInput,
+    dpy: &str,
+    budget: Duration,
+    op: impl FnOnce(&mut InputConn) -> Result<T, CuaError> + Send + 'static,
+) -> Native<T> {
+    let Ok(mut guard) = tokio::time::timeout(INPUT_LOCK_WAIT, input.lock()).await else {
+        tracing::error!(
+            display = dpy,
+            wait_ms = INPUT_LOCK_WAIT.as_millis() as u64,
+            "cua xtest busy; an earlier call is still inside the X server"
+        );
+        return Native::Wedged(wedged(
+            dpy,
+            "XTEST busy; an earlier call is still inside the X server",
+        ));
+    };
+    let display = dpy.to_string();
+    // Connecting runs here too, not just `op`: `InputConn::connect` is three
+    // round-trips and a paused server blocks the first one. `guard` moves
+    // into the task so the lock is released by whichever thread finishes the
+    // work, even when the caller below has already given up on it.
+    let job = tokio::task::spawn_blocking(move || {
+        let state = guard.get_or_insert_with(|| connect_state(&display));
+        if state.display != display {
+            *state = connect_state(&display);
+        }
+        match &mut state.backend {
+            Backend::Cli => None,
+            Backend::Native(conn) => {
+                let result = op(conn);
+                if result.is_err() {
+                    // Drop a broken socket so the next call reconnects (or falls back).
+                    *guard = None;
+                }
+                Some(result)
             }
-            Some(result)
+        }
+    });
+    match tokio::time::timeout(budget, job).await {
+        Ok(Ok(Some(result))) => Native::Ran(result),
+        Ok(Ok(None)) => Native::Unavailable,
+        Ok(Err(err)) => Native::Ran(Err(CuaError::Tool(format!("xtest worker: {err}")))),
+        Err(_) => {
+            // A blocking task cannot be cancelled: it stays parked in the X
+            // server and keeps the guard, which is exactly how the next
+            // caller finds out fast. Say so loudly — a keystroke that never
+            // reached the server must not look like one that landed.
+            tracing::error!(
+                display = dpy,
+                ms = budget.as_millis() as u64,
+                "cua xtest timed out; the X server is not answering"
+            );
+            Native::Wedged(wedged(
+                dpy,
+                &format!("XTEST timed out after {}ms", budget.as_millis()),
+            ))
         }
     }
 }
@@ -501,11 +601,14 @@ impl InputConn {
         Ok(())
     }
 
-    pub(crate) fn type_text(&mut self, text: &str) -> Result<(), CuaError> {
+    /// Keysyms, not text: `char_to_keysym` is pure, so the caller resolves
+    /// them before the connection is taken and the deadline only has to
+    /// cover X round-trips.
+    pub(crate) fn type_keysyms(&mut self, keysyms: &[Keysym]) -> Result<(), CuaError> {
         let mask = self.query_mod_mask()?;
         let released = self.release_mask(mask)?;
-        for ch in text.chars() {
-            self.send_keysym(char_to_keysym(ch), KeyAction::Tap)?;
+        for &keysym in keysyms {
+            self.send_keysym(keysym, KeyAction::Tap)?;
         }
         for kc in released {
             self.key(kc, true)?;
@@ -515,11 +618,10 @@ impl InputConn {
 
     pub(crate) fn key_seq(
         &mut self,
-        key: &str,
+        seq: &[Keysym],
         action: KeyAction,
         clear: bool,
     ) -> Result<(), CuaError> {
-        let seq = parse_key_sequence(key)?;
         let released = if clear {
             let mask = self.query_mod_mask()?;
             self.release_mask(mask)?
@@ -528,7 +630,7 @@ impl InputConn {
         };
         match action {
             KeyAction::Tap => {
-                for ks in &seq {
+                for ks in seq {
                     self.send_keysym(*ks, KeyAction::Down)?;
                 }
                 for ks in seq.iter().rev() {
@@ -536,7 +638,7 @@ impl InputConn {
                 }
             }
             KeyAction::Down => {
-                for ks in &seq {
+                for ks in seq {
                     self.send_keysym(*ks, KeyAction::Down)?;
                 }
             }
@@ -566,17 +668,38 @@ fn key_but_mask_bits(mask: KeyButMask) -> u16 {
     u16::from(mask)
 }
 
-pub(crate) async fn move_pointer(config: &CuaConfig, x: i32, y: i32) -> Result<(), CuaError> {
-    match with_native(&config.display, |c| c.motion(x, y)) {
-        Some(Ok(())) => Ok(()),
-        Some(Err(err)) => {
-            tracing::warn!(error = %err, "xtest motion failed; xdotool");
-            crate::xdotool::xdotool(config, &["mousemove", &x.to_string(), &y.to_string()]).await
+/// Decide what a finished XTEST attempt means for the caller.
+///
+/// A protocol failure or a missing XTEST extension is worth retrying through
+/// xdotool. A wedged server is not: xdotool drives the same X server, so the
+/// fallback would burn its own 2.5 s timeout and then report a tool failure
+/// where the truth is "the display stopped answering".
+async fn or_xdotool<F, Fut>(
+    outcome: Native<()>,
+    op: &'static str,
+    fallback: F,
+) -> Result<(), CuaError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(), CuaError>>,
+{
+    match outcome {
+        Native::Ran(Ok(())) => Ok(()),
+        Native::Ran(Err(err)) => {
+            tracing::warn!(op, error = %err, "xtest failed; xdotool");
+            fallback().await
         }
-        None => {
-            crate::xdotool::xdotool(config, &["mousemove", &x.to_string(), &y.to_string()]).await
-        }
+        Native::Unavailable => fallback().await,
+        Native::Wedged(err) => Err(err),
     }
+}
+
+pub(crate) async fn move_pointer(config: &CuaConfig, x: i32, y: i32) -> Result<(), CuaError> {
+    let outcome = with_native(&config.display, XTEST_DEADLINE, move |c| c.motion(x, y)).await;
+    or_xdotool(outcome, "motion", || async move {
+        crate::xdotool::xdotool(config, &["mousemove", &x.to_string(), &y.to_string()]).await
+    })
+    .await
 }
 
 pub(crate) async fn pointer_press(
@@ -585,58 +708,45 @@ pub(crate) async fn pointer_press(
     y: i32,
     button: u8,
 ) -> Result<(), CuaError> {
-    match with_native(&config.display, |c| c.pointer_press(x, y, button)) {
-        Some(Ok(())) => Ok(()),
-        Some(Err(err)) => {
-            tracing::warn!(error = %err, "xtest press failed; xdotool");
-            crate::xdotool::xdotool_owned(config, &crate::pointer_press_args(x, y, button)).await
-        }
-        None => {
-            crate::xdotool::xdotool_owned(config, &crate::pointer_press_args(x, y, button)).await
-        }
-    }
+    let outcome = with_native(&config.display, XTEST_DEADLINE, move |c| {
+        c.pointer_press(x, y, button)
+    })
+    .await;
+    or_xdotool(outcome, "press", || async move {
+        crate::xdotool::xdotool_owned(config, &crate::pointer_press_args(x, y, button)).await
+    })
+    .await
 }
 
 pub(crate) async fn button_up(config: &CuaConfig, button: u8) -> Result<(), CuaError> {
-    match with_native(&config.display, |c| c.button_up(button)) {
-        Some(Ok(())) => Ok(()),
-        Some(Err(err)) => {
-            tracing::warn!(error = %err, "xtest button-up failed; xdotool");
-            crate::xdotool::xdotool(config, &["mouseup", &button.to_string()]).await
-        }
-        None => crate::xdotool::xdotool(config, &["mouseup", &button.to_string()]).await,
-    }
+    let outcome = with_native(&config.display, XTEST_DEADLINE, move |c| {
+        c.button_up(button)
+    })
+    .await;
+    or_xdotool(outcome, "button-up", || async move {
+        crate::xdotool::xdotool(config, &["mouseup", &button.to_string()]).await
+    })
+    .await
 }
 
 pub(crate) async fn button_click(config: &CuaConfig, button: u8) -> Result<(), CuaError> {
-    match with_native(&config.display, |c| c.button_click(button)) {
-        Some(Ok(())) => Ok(()),
-        Some(Err(err)) => {
-            tracing::warn!(error = %err, "xtest click failed; xdotool");
-            crate::xdotool::xdotool(
-                config,
-                &[
-                    "mousedown",
-                    &button.to_string(),
-                    "mouseup",
-                    &button.to_string(),
-                ],
-            )
-            .await
-        }
-        None => {
-            crate::xdotool::xdotool(
-                config,
-                &[
-                    "mousedown",
-                    &button.to_string(),
-                    "mouseup",
-                    &button.to_string(),
-                ],
-            )
-            .await
-        }
-    }
+    let outcome = with_native(&config.display, XTEST_DEADLINE, move |c| {
+        c.button_click(button)
+    })
+    .await;
+    or_xdotool(outcome, "click", || async move {
+        crate::xdotool::xdotool(
+            config,
+            &[
+                "mousedown",
+                &button.to_string(),
+                "mouseup",
+                &button.to_string(),
+            ],
+        )
+        .await
+    })
+    .await
 }
 
 pub(crate) async fn motion_path_and_release(
@@ -661,13 +771,20 @@ pub(crate) async fn motion_path_and_release(
         all.try_push(xy)
             .map_err(|_| CuaError::Invalid("too many motion points".into()))?;
     }
-    match with_native(&config.display, |c| c.motion_path_and_release(&all, button)) {
-        Some(Ok(())) => Ok(()),
-        Some(Err(err)) => {
+    match with_native(&config.display, XTEST_DEADLINE, move |c| {
+        c.motion_path_and_release(&all, button)
+    })
+    .await
+    {
+        Native::Ran(Ok(())) => Ok(()),
+        // The caller (drag / release) owns the xdotool retry here, because
+        // only it knows the waypoints. A wedge is still not retryable.
+        Native::Ran(Err(err)) => {
             tracing::warn!(error = %err, "xtest release failed; xdotool");
             Err(err)
         }
-        None => Err(CuaError::Tool("xtest unavailable".into())),
+        Native::Unavailable => Err(CuaError::Tool("xtest unavailable".into())),
+        Native::Wedged(err) => Err(err),
     }
 }
 
@@ -678,47 +795,51 @@ pub(crate) async fn scroll(
     dx: i32,
     dy: i32,
 ) -> Result<(), CuaError> {
-    match with_native(&config.display, |c| c.scroll(x, y, dx, dy)) {
-        Some(Ok(())) => Ok(()),
-        Some(Err(err)) => {
-            tracing::warn!(error = %err, "xtest scroll failed; xdotool");
-            crate::xdotool::xdotool_owned(config, &crate::scroll_args(x, y, dx, dy)).await
-        }
-        None => crate::xdotool::xdotool_owned(config, &crate::scroll_args(x, y, dx, dy)).await,
-    }
+    let outcome = with_native(&config.display, XTEST_DEADLINE, move |c| {
+        c.scroll(x, y, dx, dy)
+    })
+    .await;
+    or_xdotool(outcome, "scroll", || async move {
+        crate::xdotool::xdotool_owned(config, &crate::scroll_args(x, y, dx, dy)).await
+    })
+    .await
 }
 
 pub(crate) async fn type_text(config: &CuaConfig, text: &str) -> Result<(), CuaError> {
-    match with_native(&config.display, |c| c.type_text(text)) {
-        Some(Ok(())) => Ok(()),
-        Some(Err(err)) => {
-            tracing::warn!(error = %err, "xtest type failed; xdotool");
-            crate::xdotool::xdotool(
-                config,
-                &["type", "--clearmodifiers", "--delay", "1", "--", text],
-            )
-            .await
-        }
-        None => {
-            crate::xdotool::xdotool(
-                config,
-                &["type", "--clearmodifiers", "--delay", "1", "--", text],
-            )
-            .await
-        }
-    }
+    let keysyms: SmallVec<[Keysym; 8]> = text.chars().map(char_to_keysym).collect();
+    // One call types the whole string, so the budget has to grow with it:
+    // an unmapped keysym is a keymap round-trip per character. See
+    // `TYPE_CHAR_BUDGET`.
+    let budget = XTEST_DEADLINE + TYPE_CHAR_BUDGET * keysyms.len() as u32;
+    let outcome = with_native(&config.display, budget, move |c| c.type_keysyms(&keysyms)).await;
+    or_xdotool(outcome, "type", || async move {
+        crate::xdotool::xdotool(
+            config,
+            &["type", "--clearmodifiers", "--delay", "1", "--", text],
+        )
+        .await
+    })
+    .await
 }
 
 pub(crate) async fn key(config: &CuaConfig, key: &str, action: KeyAction) -> Result<(), CuaError> {
     let clear = matches!(action, KeyAction::Tap);
-    match with_native(&config.display, |c| c.key_seq(key, action, clear)) {
-        Some(Ok(())) => Ok(()),
-        Some(Err(err)) => {
-            tracing::warn!(error = %err, "xtest key failed; xdotool");
-            xdotool_key(config, key, action).await
-        }
-        None => xdotool_key(config, key, action).await,
-    }
+    // Parsed before the blocking hop because it is pure. A name this crate
+    // does not know is not an invalid key: xdotool knows keysym names (the
+    // XF86 media keys) that `keys.rs` does not, and that fallback predates
+    // the deadline work.
+    let Ok(seq) = parse_key_sequence(key) else {
+        tracing::warn!(key, "key name is not in the keysym table; xdotool");
+        return xdotool_key(config, key, action).await;
+    };
+    let outcome = with_native(&config.display, XTEST_DEADLINE, move |c| {
+        c.key_seq(&seq, action, clear)
+    })
+    .await;
+    or_xdotool(outcome, "key", || async move {
+        xdotool_key(config, key, action).await
+    })
+    .await
 }
 
 async fn xdotool_key(config: &CuaConfig, key: &str, action: KeyAction) -> Result<(), CuaError> {
@@ -761,13 +882,160 @@ mod live {
         assert!(png.len() > 64, "png too small: {}", png.len());
     }
 
-    #[test]
-    fn xtest_motion_when_display_is_up() {
+    #[tokio::test]
+    async fn xtest_motion_when_display_is_up() {
         let Some(display) = live_display() else {
             return;
         };
-        with_native(&display, |c| c.motion(16, 16))
-            .expect("XTEST should be present")
-            .expect("motion");
+        match with_native(&display, XTEST_DEADLINE, |c| c.motion(16, 16)).await {
+            Native::Ran(result) => result.expect("motion"),
+            Native::Unavailable => panic!("XTEST should be present"),
+            Native::Wedged(err) => panic!("live display should answer: {err}"),
+        }
+    }
+}
+
+/// A paused X server, without an X server.
+#[cfg(test)]
+mod deadlines {
+    use super::*;
+
+    use std::os::unix::net::UnixListener;
+    use std::sync::mpsc;
+
+    /// Wedging the process-wide `INPUT` would park it for the rest of the
+    /// test binary, so this module wedges a connection of its own.
+    static TEST_INPUT: XInput = XInput::const_new(None);
+
+    struct FakeServer {
+        display: String,
+        path: std::path::PathBuf,
+        release: mpsc::Sender<()>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl FakeServer {
+        /// Accepts, then says nothing: from the client side this is exactly a
+        /// `kill -STOP`ped X server, because x11rb blocks in the setup
+        /// handshake and has no reply deadline.
+        ///
+        /// `None` when the socket cannot be placed, which is the same skip
+        /// the live tests above take when there is nothing to talk to.
+        fn wedged() -> Option<Self> {
+            let dir = std::path::Path::new("/tmp/.X11-unix");
+            std::fs::create_dir_all(dir).ok()?;
+            // x11rb builds the socket path from the display number, so the
+            // fake server has to sit where a real one would. Bind decides
+            // which number is free: an occupied path is somebody else's X
+            // server and must not be unlinked.
+            let (display, path, listener) = (900..=920).find_map(|n| {
+                let path = dir.join(format!("X{n}"));
+                let listener = UnixListener::bind(&path).ok()?;
+                Some((format!(":{n}"), path, listener))
+            })?;
+            let (release, wait) = mpsc::channel();
+            let thread = std::thread::spawn(move || {
+                let held = listener.accept().map(|(stream, _)| stream);
+                let _ = wait.recv();
+                drop(held);
+            });
+            Some(Self {
+                display,
+                path,
+                release,
+                thread: Some(thread),
+            })
+        }
+
+        fn display(&self) -> String {
+            self.display.clone()
+        }
+
+        /// Hang up, which unparks the abandoned worker.
+        fn resume(&mut self) {
+            let _ = self.release.send(());
+            // If an assertion fired before anything connected, the thread is
+            // still in `accept`; knock so that joining it cannot hang the
+            // test the way this whole file is about not hanging.
+            let _ = std::os::unix::net::UnixStream::connect(&self.path);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    impl Drop for FakeServer {
+        fn drop(&mut self) {
+            self.resume();
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    async fn motion(display: &str, budget: Duration) -> Native<()> {
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            with_native_on(&TEST_INPUT, display, budget, |c| c.motion(1, 1)),
+        )
+        .await
+        .expect("with_native must return on its own deadline, never hang")
+    }
+
+    #[tokio::test]
+    async fn wedged_server_times_out_and_later_calls_do_not_queue() {
+        let Some(mut server) = FakeServer::wedged() else {
+            eprintln!("no writable /tmp/.X11-unix slot; skipping");
+            return;
+        };
+        let display = server.display();
+        let budget = Duration::from_millis(300);
+
+        let started = Instant::now();
+        let first = motion(&display, budget).await;
+        let waited = started.elapsed();
+        match first {
+            Native::Wedged(CuaError::DisplayDown(msg)) => {
+                assert!(msg.contains("timed out"), "reported as a timeout: {msg}");
+            }
+            Native::Ran(Ok(())) => panic!("a silent server cannot have moved the pointer"),
+            Native::Ran(Err(err)) => panic!("a silent server is not a failure: {err}"),
+            Native::Unavailable => panic!("connecting to a silent server cannot finish"),
+            Native::Wedged(err) => panic!("wedges are 503 DisplayDown, got {err:?}"),
+        }
+        assert!(waited >= budget, "returned before the deadline: {waited:?}");
+        assert!(waited < budget * 4, "far past the deadline: {waited:?}");
+
+        // The worker is still parked in the X server holding the connection.
+        // The next caller must be told that, not queued behind it.
+        let started = Instant::now();
+        match motion(&display, budget).await {
+            Native::Wedged(CuaError::DisplayDown(msg)) => {
+                assert!(msg.contains("busy"), "reported as busy: {msg}");
+            }
+            other => panic!("second call should report the wedge: {}", name(&other)),
+        }
+        assert!(
+            started.elapsed() < INPUT_LOCK_WAIT * 4,
+            "second call waited for the whole X deadline"
+        );
+
+        // Recovery without restarting the process: the parked worker returns,
+        // drops the guard, and the connection is usable again. (This fake
+        // server hangs up rather than answering, so the backend it settles on
+        // is the xdotool fallback.)
+        server.resume();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while let Native::Wedged(err) = motion(&display, budget).await {
+            assert!(Instant::now() < deadline, "never recovered: {err}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    fn name<T>(outcome: &Native<T>) -> &'static str {
+        match outcome {
+            Native::Ran(Ok(_)) => "ran ok",
+            Native::Ran(Err(_)) => "ran with an error",
+            Native::Unavailable => "unavailable",
+            Native::Wedged(_) => "wedged",
+        }
     }
 }
