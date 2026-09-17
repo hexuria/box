@@ -31,6 +31,10 @@ pub struct MetricsResponse {
     pub service: &'static str,
     pub uptime_ms: u64,
     pub execs: ExecMetrics,
+    /// Descriptors this process has open, or `null` where the platform gives
+    /// no way to count them. A descriptor leak in the exec path is otherwise
+    /// invisible until the table is full.
+    pub open_fds: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -38,6 +42,8 @@ pub struct ExecMetrics {
     pub current: usize,
     pub max: usize,
     pub started: u64,
+    /// Child process groups this daemon is currently responsible for killing.
+    pub child_groups: usize,
 }
 
 pub async fn busy(State(state): State<AppState>) -> Json<BusyResponse> {
@@ -66,6 +72,11 @@ pub async fn shutdown(State(state): State<AppState>) -> Json<ShutdownResponse> {
 }
 
 pub async fn metrics(State(state): State<AppState>) -> Json<MetricsResponse> {
+    let child_groups = state
+        .child_groups
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .len();
     Json(MetricsResponse {
         service: "box-exec",
         uptime_ms: state.started_at.elapsed().as_millis() as u64,
@@ -73,6 +84,8 @@ pub async fn metrics(State(state): State<AppState>) -> Json<MetricsResponse> {
             current: state.execs_in_flight.load(Ordering::Relaxed),
             max: state.max_concurrent_execs,
             started: state.execs_started.load(Ordering::Relaxed),
+            child_groups,
         },
+        open_fds: crate::fdcount::open_fd_count(),
     })
 }

@@ -15,7 +15,10 @@ pub mod request_id;
 
 pub use alloc::GLOBAL_ALLOCATOR;
 pub use auth::{bearer_token, tokens_equal};
-pub use config::{wipe_secret_environ, BoxConfig, ConfigError, MIN_TOKEN_LEN, SECRET_ENV_KEYS};
+pub use config::{
+    wipe_secret_environ, BoxConfig, ConfigError, MIN_TOKEN_LEN, SECRET_ENV_KEYS,
+    SECRET_FILE_ENV_KEYS,
+};
 pub use cors::layer as cors_layer;
 pub use env::{env_bool, env_nonempty};
 pub use error::{ApiError, ErrorBody, ErrorResponse};

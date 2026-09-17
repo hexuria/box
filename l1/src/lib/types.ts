@@ -48,6 +48,7 @@ export type ExecResult = {
   duration_ms?: number;
   cwd?: string;
   truncated?: boolean;
+  output_complete?: boolean;
 };
 
 export type DirEntry = {

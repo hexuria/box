@@ -79,6 +79,10 @@ class GrokBox:
     def exec_status(self, exec_id: str) -> Any:
         return self._auth("GET", f"{self.exec_url}/v1/exec/{exec_id}")
 
+    def exec_cancel(self, exec_id: str) -> Any:
+        """Stop a running exec and its whole process group."""
+        return self._auth("DELETE", f"{self.exec_url}/v1/exec/{exec_id}")
+
     def files_get(self, path: str, encoding: str | None = None) -> Any:
         query = {"path": path}
         if encoding:

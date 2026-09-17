@@ -67,12 +67,20 @@ Bind addresses: inside the guest image, `BOX_EXEC_BIND` / `BOX_HOST_BIND` defaul
 - **Unauthenticated:** `GET /v1/health` on both daemons (`{"status":"ok"}` only).
 - **Authenticated:** everything else, including `/v1/ready`, file I/O, CUA, and `/v1/info`.
 - **Insecure tokens:** `dev-box-token`, empty, or shorter than 16 characters are rejected unless `BOX_ALLOW_INSECURE_DEV=1` **and** both daemon binds are loopback.
-- **Docker:** the entrypoint exits if `BOX_TOKEN` is missing. After spawn it unsets secrets from the entrypoint shell. Daemons wipe those vars from their own environ after load.
-- **Exec children:** `BOX_TOKEN`, `BOX_HOST_TOKEN`, and `BOX_VNC_PASSWORD` are stripped from the child environment.
+- **Delivery:** as a file (`BOX_TOKEN_FILE`, `BOX_HOST_TOKEN_FILE`, `BOX_VNC_PASSWORD_FILE`) or as a value. The file form wins and is what Compose and EnsureBox use. A value passed through the container environment lands in pid 1's environ block, which `/proc/1/environ` serves to every process in the box; `unsetenv` cannot take it back out, because it edits the pointer array and not the block. See README §Auth.
+- **Docker:** the entrypoint exits if neither `BOX_TOKEN` nor `BOX_TOKEN_FILE` is set. It hands each daemon a path, never a value, so no daemon has a secret in its own environ. Each daemon reads its staged file and unlinks it.
+- **Residual exposure:** the file the operator mounts is readable by uid 1000, because the container healthcheck has to authenticate. Code execution in the box is compromise of `BOX_TOKEN` and `BOX_VNC_PASSWORD`.
+- **Exec children:** `BOX_TOKEN`, `BOX_HOST_TOKEN`, `BOX_VNC_PASSWORD`, and their `_FILE` forms are stripped from the child environment.
 - **Viewer:** noVNC is not Bearer-authenticated. x11vnc uses `BOX_VNC_PASSWORD` (first 8 characters). Independent of `BOX_TOKEN`. Host publish is loopback.
 - **CORS:** default is no browser origins. Set `BOX_CORS_ORIGINS` to an explicit comma-separated list if a browser must call the guest. `*` is ignored.
 
 WebSocket streaming for exec is **not** in this tree. Use `POST /v1/exec` (bounded output, timeout; stdout/stderr are kept on timeout) or `POST /v1/exec/stream` (NDJSON/SSE). PTY is deferred.
+
+## Exec process lifetime
+
+Each exec runs in its own process group (`process_group(0)`). One guard owns the group id for the life of the request, so timeout, explicit cancel, and the caller hanging up all end at the same cleanup: **SIGTERM** to the group, **SIGKILL** after `BOX_EXEC_KILL_GRACE_MS`. `DELETE /v1/exec/{id}` is the explicit form; `GET /v1/metrics` reports how many groups the daemon currently owns.
+
+A command that finishes normally does **not** have its group killed, so `nohup myserver &` keeps running — that is the point of the pattern. What the daemon will not do is pretend it saw all the output: a background process holds the pipes open, so the response carries `output_complete: false` and `truncated: true`. Reading stops once the direct child exits rather than waiting for an EOF that no longer arrives.
 
 ## `/v1/info` URLs
 

@@ -3,6 +3,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
+use std::time::Duration;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
@@ -742,4 +743,260 @@ async fn exec_detach_then_status() {
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
     panic!("detached job never finished: {last}");
+}
+
+/// Argv that prints a marker, leaves a grandchild holding both pipes, and then
+/// blocks. `exec` keeps the grandchild's pid equal to the one it reports, and a
+/// non-interactive `sh` puts background jobs in its own process group, so the
+/// grandchild is exactly what the exec's group signal has to reach.
+fn spawns_a_grandchild(pid_file: &str) -> String {
+    format!("sh -c 'echo $$ > {pid_file}; exec sleep 60' & echo spawned; sleep 60")
+}
+
+/// Poll until the pid file exists and parses. The shell writes it a moment
+/// after the request starts, so "it is there" is not something the caller can
+/// assume from having sent the request.
+async fn wait_for_pid(path: &std::path::Path) -> i32 {
+    for _ in 0..200 {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            if let Ok(pid) = text.trim().parse::<i32>() {
+                if pid > 0 {
+                    return pid;
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("grandchild never reported its pid: {}", path.display());
+}
+
+/// `kill(pid, 0)` succeeds for a live process and for a zombie; an orphan is
+/// reparented to init and reaped, so the signal starting to fail is the
+/// observable "this process tree is gone".
+async fn wait_until_gone(pid: i32) -> bool {
+    for _ in 0..200 {
+        // Safety: signal 0 performs the permission and existence check only.
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    false
+}
+
+#[tokio::test]
+async fn exec_keeps_foreground_output_when_a_background_process_survives() {
+    let dir = TempDir::new().unwrap();
+    let started = std::time::Instant::now();
+    let (status, body) = send(
+        state(&dir),
+        auth_json(
+            "POST",
+            "/v1/exec",
+            "secret-token",
+            json!({
+                "command": "echo BEFORE; (sleep 5 &); echo AFTER",
+                "timeout_ms": 5000
+            }),
+        ),
+    )
+    .await;
+    let elapsed = started.elapsed();
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let stdout = body["stdout"].as_str().unwrap_or("");
+    assert!(
+        stdout.contains("BEFORE"),
+        "dropped output before the fork: {body}"
+    );
+    assert!(
+        stdout.contains("AFTER"),
+        "dropped output after the fork: {body}"
+    );
+    assert_eq!(body["exit_code"], 0, "{body}");
+    // The grandchild still holds both write ends, so the daemon cannot promise
+    // it saw everything and must not claim it did by omission.
+    assert_eq!(body["output_complete"], false, "{body}");
+    assert_eq!(body["truncated"], true, "{body}");
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "waiting for an EOF that is not coming: {elapsed:?}"
+    );
+}
+
+#[tokio::test]
+async fn exec_reports_complete_output_for_an_ordinary_command() {
+    let dir = TempDir::new().unwrap();
+    let (status, body) = send(
+        state(&dir),
+        auth_json(
+            "POST",
+            "/v1/exec",
+            "secret-token",
+            json!({"command": ["echo", "plain"]}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["output_complete"], true, "{body}");
+    assert_eq!(body["truncated"], false, "{body}");
+}
+
+#[tokio::test]
+async fn exec_with_background_process_does_not_leak_descriptors() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir);
+    let body = json!({"command": "(sleep 5 &); echo hi", "timeout_ms": 5000});
+    // The first calls settle descriptors tokio opens lazily (signal driver and
+    // friends), so the measurement below is only about the exec path.
+    for _ in 0..3 {
+        let (status, _) = send(
+            s.clone(),
+            auth_json("POST", "/v1/exec", "secret-token", body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let before = crate::fdcount::open_fd_count().expect("this platform reports open descriptors");
+    for _ in 0..10 {
+        let (status, _) = send(
+            s.clone(),
+            auth_json("POST", "/v1/exec", "secret-token", body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let after = crate::fdcount::open_fd_count().expect("this platform reports open descriptors");
+    assert!(
+        after <= before + 2,
+        "each background-spawning exec leaked descriptors: {before} -> {after}"
+    );
+}
+
+#[tokio::test]
+async fn cancelled_request_kills_the_whole_process_group() {
+    let dir = TempDir::new().unwrap();
+    let pid_file = dir.path().join("grandchild.pid");
+    let call = app(state(&dir)).oneshot(auth_json(
+        "POST",
+        "/v1/exec",
+        "secret-token",
+        json!({
+            "command": ["sh", "-c", spawns_a_grandchild("grandchild.pid")],
+            "timeout_ms": 10000
+        }),
+    ));
+    // Run it on its own task and abort: aborting drops the handler future,
+    // which is exactly what axum does to it when the HTTP client disconnects.
+    let inflight = tokio::spawn(call);
+    let pid = wait_for_pid(&pid_file).await;
+    inflight.abort();
+    assert!(
+        wait_until_gone(pid).await,
+        "grandchild {pid} outlived the cancelled request"
+    );
+}
+
+#[tokio::test]
+async fn stream_client_disconnect_kills_the_whole_process_group() {
+    let dir = TempDir::new().unwrap();
+    let pid_file = dir.path().join("grandchild.pid");
+    let response = app(state(&dir))
+        .oneshot(auth_json(
+            "POST",
+            "/v1/exec/stream",
+            "secret-token",
+            json!({
+                "command": ["sh", "-c", spawns_a_grandchild("grandchild.pid")],
+                "timeout_ms": 10000
+            }),
+        ))
+        .await
+        .expect("stream response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let pid = wait_for_pid(&pid_file).await;
+    // Dropping the response drops the body stream, and with it the receiver
+    // the exec task is writing into — the streaming equivalent of hanging up.
+    drop(response);
+    assert!(
+        wait_until_gone(pid).await,
+        "grandchild {pid} outlived the disconnected stream"
+    );
+}
+
+#[tokio::test]
+async fn cancel_endpoint_kills_a_detached_process_group() {
+    let dir = TempDir::new().unwrap();
+    let s = state(&dir);
+    let pid_file = dir.path().join("grandchild.pid");
+    let (status, body) = send(
+        s.clone(),
+        auth_json(
+            "POST",
+            "/v1/exec",
+            "secret-token",
+            json!({
+                "command": ["sh", "-c", spawns_a_grandchild("grandchild.pid")],
+                "detach": true,
+                "timeout_ms": 10000
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let id = body["exec_id"].as_str().expect("exec_id").to_string();
+    let pid = wait_for_pid(&pid_file).await;
+
+    let (status, body) = send(
+        s.clone(),
+        Request::builder()
+            .method("DELETE")
+            .uri(format!("/v1/exec/{id}"))
+            .header("authorization", "Bearer secret-token")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["cancelled"], true, "{body}");
+    assert!(
+        wait_until_gone(pid).await,
+        "grandchild {pid} outlived DELETE /v1/exec/{id}"
+    );
+}
+
+#[tokio::test]
+async fn cancel_rejects_an_unknown_exec_id() {
+    let dir = TempDir::new().unwrap();
+    let (status, body) = send(
+        state(&dir),
+        Request::builder()
+            .method("DELETE")
+            .uri("/v1/exec/exec-does-not-exist")
+            .header("authorization", "Bearer secret-token")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "not_found");
+}
+
+#[tokio::test]
+async fn metrics_reports_child_groups_and_open_descriptors() {
+    let dir = TempDir::new().unwrap();
+    let (status, body) = send(
+        state(&dir),
+        Request::builder()
+            .uri("/v1/metrics")
+            .header("authorization", "Bearer secret-token")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["execs"]["child_groups"], 0, "{body}");
+    assert!(
+        body["open_fds"].as_u64().unwrap_or(0) > 0,
+        "open descriptor gauge missing: {body}"
+    );
 }

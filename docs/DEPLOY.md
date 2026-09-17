@@ -117,7 +117,7 @@ This guest is **RAM-heavy**: Debian + Xvfb + openbox + Chromium + two Rust daemo
 | 5900 | **no** | x11vnc, `127.0.0.1` inside the container |
 | 9222 | **no** | Chromium CDP, `127.0.0.1` only |
 
-`BOX_TOKEN` is bearer auth. It is **not** a substitute for TLS. Do **not** expose exec/host as raw HTTP on a public IP. Compose fails if `BOX_TOKEN` or `BOX_VNC_PASSWORD` is unset.
+`BOX_TOKEN` is bearer auth. It is **not** a substitute for TLS. Do **not** expose exec/host as raw HTTP on a public IP. Compose reads the token and the VNC password from `./secrets/box_token` and `./secrets/box_vnc_password`; run `bash scripts/write-secrets.sh` (it reads `BOX_TOKEN` / `BOX_VNC_PASSWORD` from the environment or `.env`) before `docker compose up`, or Compose fails on the missing secret file.
 
 Health is **unauthenticated** and returns only `{"status":"ok"}`. Ready requires Bearer.
 
@@ -236,6 +236,7 @@ Akamai Cloud Compute **is** Linode. The OpenTofu/Terraform provider for **VMs** 
    shred -u /tmp/box-token
    mkdir -p workspace-data chrome-profile
    sudo chown -R 1000:1000 workspace-data chrome-profile
+   bash scripts/write-secrets.sh   # ./secrets/* — Compose mounts these, see §Secrets
    docker compose up --build -d
    docker compose ps
    curl -fsS -H "Authorization: Bearer $(grep ^BOX_TOKEN= .env | cut -d= -f2-)" http://127.0.0.1:1340/v1/ready
@@ -425,7 +426,7 @@ After the Akamai VM is up and Compose is healthy:
 ## G. Security and ops
 
 - **Rotate `BOX_TOKEN`:** recreate the container with a new env value (`docker compose up -d --force-recreate`). Update the laptop env. Rotate `BOX_VNC_PASSWORD` the same way; it is independent of the bearer.
-- **Do not log tokens.** Do not put them in Compose `docker compose config` pastebins, CI logs, or L1. Daemons wipe `BOX_TOKEN`, `BOX_HOST_TOKEN`, and `BOX_VNC_PASSWORD` from their own environ after load. Exec children are stripped too.
+- **Do not log tokens.** Do not put them in Compose `docker compose config` pastebins, CI logs, or L1. Compose mounts `./secrets/*` rather than putting values in the container environment, so the token is not in `docker inspect` or in any `/proc/<pid>/environ`. It **is** readable at `/run/secrets/box_token` by anything running as the box user, which the healthcheck needs; see README §Auth for what that does and does not protect. Exec children never get any of these variables.
 - Guest **must not** leak `BOX_TOKEN` to L1. L1 smoke asserts the L1 source never mentions it, `vncPassword`, or raw 6080 password UI.
 - SSH **keys**, not passwords. `PermitRootLogin prohibit-password`. `unattended-upgrades`.
 - **Disk:** `workspace-data` is **your** files. `chrome-profile` is cookies/session for uid **1000**. Bind mounts created as root are not writable by `box` until `chown 1000:1000`. Back up the workspace volume if you care; the image is rebuildable.

@@ -44,6 +44,10 @@ fi
 mkdir -p workspace-data chrome-profile
 chmod u+rwx workspace-data chrome-profile 2>/dev/null || true
 
+# Compose mounts ./secrets/* instead of putting the values in the container
+# environment, so they have to exist before anything is started.
+bash "${ROOT}/scripts/write-secrets.sh"
+
 echo "==> building and starting grok-box"
 "${COMPOSE[@]}" up --build -d
 
@@ -134,6 +138,22 @@ if echo "${token_env}" | grep -q LEAKED; then
   echo "BOX_TOKEN leaked into exec child" >&2
   exit 1
 fi
+
+echo "==> secrets are not in any /proc/<pid>/environ"
+# The acceptance check for the file-delivered secrets: with BOX_TOKEN_FILE set,
+# nothing in the box can recover the token or the VNC password by reading an
+# environment block, including pid 1.
+proc_environ="$(curl -fsS \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"command":["sh","-c","if grep -aq BOX_TOKEN= /proc/1/environ || grep -aq BOX_VNC_PASSWORD= /proc/1/environ; then echo PROC_LEAKED; else echo PROC_CLEAN; fi"]}' \
+  "${EXEC_URL}/v1/exec")"
+echo "${proc_environ}"
+if echo "${proc_environ}" | grep -q PROC_LEAKED; then
+  echo "BOX_TOKEN or BOX_VNC_PASSWORD is readable in /proc/1/environ" >&2
+  exit 1
+fi
+echo "${proc_environ}" | grep -q PROC_CLEAN
 
 echo "==> auth reject"
 code="$(curl -s -o /dev/null -w '%{http_code}' \
@@ -277,9 +297,9 @@ echo "${recipe}" | grep -q '"ran":3'
 echo "==> BOX_DESKTOP=0 still serves exec+host"
 "${COMPOSE[@]}" down --remove-orphans >/dev/null 2>&1 || true
 if [[ "${COMPOSE[0]}" == "sudo" ]]; then
-  sudo -n env BOX_DESKTOP=0 BOX_DESKTOP_REQUIRED=0 BOX_TOKEN="${TOKEN}" BOX_VNC_PASSWORD="${BOX_VNC_PASSWORD}" docker compose up -d --force-recreate
+  sudo -n env BOX_DESKTOP=0 BOX_DESKTOP_REQUIRED=0 docker compose up -d --force-recreate
 else
-  BOX_DESKTOP=0 BOX_DESKTOP_REQUIRED=0 BOX_TOKEN="${TOKEN}" BOX_VNC_PASSWORD="${BOX_VNC_PASSWORD}" "${COMPOSE[@]}" up -d --force-recreate
+  BOX_DESKTOP=0 BOX_DESKTOP_REQUIRED=0 "${COMPOSE[@]}" up -d --force-recreate
 fi
 ok=0
 for _ in $(seq 1 90); do

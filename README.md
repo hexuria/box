@@ -25,7 +25,8 @@ This tree implements **our own HTTP wire**. It is not Cursor’s `/exec-daemon` 
 ## Quick start (guest)
 
 ```bash
-cp .env.example .env          # set BOX_TOKEN and BOX_VNC_PASSWORD (required)
+cp .env.example .env            # set BOX_TOKEN and BOX_VNC_PASSWORD (required)
+bash scripts/write-secrets.sh   # turns them into ./secrets/* for Compose to mount
 docker compose up --build
 ```
 
@@ -134,7 +135,9 @@ Compose also sets `cap_drop: [ALL]`, `security_opt: [no-new-privileges:true]`, `
 | Variable | Default (image) | Meaning |
 | --- | --- | --- |
 | `BOX_TOKEN` | **required** | Bearer token for exec, CUA, and host `/v1/info` / `/v1/ready`. No silent default. |
+| `BOX_TOKEN_FILE` | unset | Path to a file holding `BOX_TOKEN`. **Preferred**: wins over `BOX_TOKEN`, and keeps the value out of `/proc/<pid>/environ`. |
 | `BOX_HOST_TOKEN` | same as `BOX_TOKEN` | Optional split token for host info/desktop/chrome |
+| `BOX_HOST_TOKEN_FILE` | unset | Path to a file holding `BOX_HOST_TOKEN` |
 | `BOX_ALLOW_INSECURE_DEV` | unset | `1` allows short/well-known tokens **only** when both daemon binds are loopback |
 | `BOX_ID` | hostname / `grok-box` | Reported by `/v1/info` |
 | `WORKSPACE_ROOT` | `/workspace` | Jail root for cwd and file APIs |
@@ -149,6 +152,7 @@ Compose also sets `cap_drop: [ALL]`, `security_opt: [no-new-privileges:true]`, `
 | `BOX_VNC_BIND` | `127.0.0.1:5900` | x11vnc (localhost only) |
 | `BOX_NOVNC_PORT` | `6080` | noVNC / websockify |
 | `BOX_VNC_PASSWORD` | **required when desktop on** | Viewer password; independent of `BOX_TOKEN`; x11vnc uses 8 chars |
+| `BOX_VNC_PASSWORD_FILE` | unset | Path to a file holding `BOX_VNC_PASSWORD`. Preferred, same reason. |
 | `BOX_CHROME` | `1` | Launch Chromium on `:1` |
 | `BOX_CHROME_PROFILE` | `/home/box/chrome-profile` | Persistent profile (compose volume) |
 | `BOX_CDP_PORT` | `9222` | CDP on `127.0.0.1` only |
@@ -159,9 +163,23 @@ Compose also sets `cap_drop: [ALL]`, `security_opt: [no-new-privileges:true]`, `
 
 ## Auth
 
-Send `Authorization: Bearer <token>`. `GET /v1/health` is public and returns only `{"status":"ok"}`. `GET /v1/ready` requires Bearer (Compose healthcheck sends it). `BOX_TOKEN` must be set; `dev-box-token` and other short/well-known values are rejected unless `BOX_ALLOW_INSECURE_DEV=1` **and** both daemon binds are loopback.
+Send `Authorization: Bearer <token>`. `GET /v1/health` is public and returns only `{"status":"ok"}`. `GET /v1/ready` requires Bearer (Compose healthcheck sends it). A token must be set — as `BOX_TOKEN` or as `BOX_TOKEN_FILE`; `dev-box-token` and other short/well-known values are rejected unless `BOX_ALLOW_INSECURE_DEV=1` **and** both daemon binds are loopback.
 
-Daemons drop `BOX_TOKEN`, `BOX_HOST_TOKEN`, and `BOX_VNC_PASSWORD` from their own process environ after load. Exec children are stripped too. Do not put `BOX_TOKEN` in L1. This does not fix Chromium `--no-sandbox` reading `/proc`.
+### Delivering the secrets
+
+Pass each secret as a **file**, not as a value: `BOX_TOKEN_FILE`, `BOX_HOST_TOKEN_FILE`, `BOX_VNC_PASSWORD_FILE`. The file form wins when both are set. Compose does this for you — `scripts/write-secrets.sh` writes `./secrets/*` and Compose mounts them read-only at `/run/secrets/`.
+
+A secret handed to the container as an **environment value** is copied into pid 1's environment block at `execve`. `/proc/1/environ` serves that block to every process in the box, for the life of the box, and `docker inspect` shows it on the host. Nothing inside the box can undo that. In particular `wipe_secret_environ()` does **not**: `unsetenv` rewrites the `environ` pointer array but leaves the original block on the stack, and that block is what `/proc` reads. What it does do is keep the value out of `getenv` for the rest of the process, which is worth having but is not the same claim.
+
+What the file form buys, precisely:
+
+- `grep -a BOX_TOKEN= /proc/*/environ` finds nothing — not in pid 1, not in either daemon, not in Chromium.
+- `docker inspect` does not show the token in `Config.Env`.
+- The daemons unlink the staged copies the entrypoint writes for them, so those exist for milliseconds.
+
+What it does **not** buy: the file the operator mounts stays readable by uid 1000 (the Compose healthcheck needs it to authenticate). Code already executing as the box user — a compromised Chromium renderer, or any binary the agent downloaded and ran — can read `/run/secrets/box_token` and recover both secrets. Treat any code execution in the box as full compromise of `BOX_TOKEN` and `BOX_VNC_PASSWORD`. Rotate on suspicion; do not reuse a box token anywhere else.
+
+Exec children never receive any of these variables, in either form. Do not put `BOX_TOKEN` in L1.
 
 ## Layout
 

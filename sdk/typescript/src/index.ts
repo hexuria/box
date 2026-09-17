@@ -51,10 +51,21 @@ export type ExecResponse = {
   timed_out: boolean;
   duration_ms: number;
   truncated: boolean;
+  /**
+   * Both pipes reached EOF. `false` means a process the command left running
+   * still holds them, so output written after the foreground exited was not
+   * captured. Absent on guests older than this field.
+   */
+  output_complete?: boolean;
   cwd: string;
   exec_id?: string;
   detached?: boolean;
   status?: string;
+};
+
+export type ExecCancelResponse = {
+  exec_id: string;
+  cancelled: boolean;
 };
 
 export type FilePutRequest = {
@@ -198,6 +209,11 @@ export class GrokBox {
 
   async execStatus(id: string): Promise<ExecResponse> {
     return this.authJson("GET", `${this.execUrl}/v1/exec/${encodeURIComponent(id)}`);
+  }
+
+  /** Stop a running exec and its whole process group. */
+  async execCancel(id: string): Promise<ExecCancelResponse> {
+    return this.authJson("DELETE", `${this.execUrl}/v1/exec/${encodeURIComponent(id)}`);
   }
 
   async filesGet(path: string, encoding?: string): Promise<unknown> {

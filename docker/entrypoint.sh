@@ -1,16 +1,39 @@
 #!/bin/bash
 set -euo pipefail
 
-if [[ -z "${BOX_TOKEN:-}" ]]; then
-  echo "BOX_TOKEN must be set" >&2
+# Every secret can arrive two ways: as a value (BOX_TOKEN) or as a path to a
+# file holding it (BOX_TOKEN_FILE). The file form is the one to use. A value
+# handed to the container through the environment is copied into the
+# environment block of pid 1 at execve and stays readable there —
+# /proc/1/environ — for every process in the box, for the life of the box.
+# `unset` below does not undo that; it only changes what getenv sees.
+read_secret() {
+  local name="$1"
+  local file_var="${name}_FILE"
+  local path="${!file_var:-}"
+  if [[ -n "${path}" ]]; then
+    if [[ ! -r "${path}" ]]; then
+      echo "${file_var} is set to ${path} but that file is not readable" >&2
+      exit 1
+    fi
+    tr -d '\r\n' < "${path}"
+    return 0
+  fi
+  printf '%s' "${!name:-}"
+}
+
+BOX_TOKEN_VALUE="$(read_secret BOX_TOKEN)"
+if [[ -z "${BOX_TOKEN_VALUE}" ]]; then
+  echo "BOX_TOKEN or BOX_TOKEN_FILE must be set" >&2
   exit 1
 fi
-
-# Copy secrets out of the shell environment so this long-lived entrypoint
-# (and later children such as Chromium) do not keep them in environ.
-BOX_TOKEN_VALUE="${BOX_TOKEN}"
-BOX_HOST_TOKEN_VALUE="${BOX_HOST_TOKEN:-${BOX_TOKEN}}"
-BOX_VNC_PASSWORD_VALUE="${BOX_VNC_PASSWORD:-}"
+BOX_HOST_TOKEN_VALUE="$(read_secret BOX_HOST_TOKEN)"
+if [[ -z "${BOX_HOST_TOKEN_VALUE}" ]]; then
+  BOX_HOST_TOKEN_VALUE="${BOX_TOKEN_VALUE}"
+fi
+BOX_VNC_PASSWORD_VALUE="$(read_secret BOX_VNC_PASSWORD)"
+# Shell variables are not in the environ block, so these copies are not served
+# by /proc/<pid>/environ the way the exported forms are.
 unset BOX_TOKEN BOX_HOST_TOKEN BOX_VNC_PASSWORD || true
 
 export WORKSPACE_ROOT="${WORKSPACE_ROOT:-/workspace}"
@@ -64,6 +87,7 @@ record() {
 shutdown() {
   echo "grok-box shutting down"
   local pid
+  rm -rf "${SECRET_DIR:-}" 2>/dev/null || true
   if [[ -f /tmp/box-chrome.pid ]]; then
     kill -TERM "$(cat /tmp/box-chrome.pid)" 2>/dev/null || true
   fi
@@ -229,11 +253,42 @@ if flag_on "${BOX_DESKTOP}"; then
   fi
 fi
 
-# Pass bearer secrets only to the daemons; they wipe their own environ after load.
-env BOX_TOKEN="${BOX_TOKEN_VALUE}" BOX_HOST_TOKEN="${BOX_HOST_TOKEN_VALUE}" box-exec &
+# Hand the daemons a path, never a value. `env BOX_TOKEN=... box-exec` puts the
+# token in that daemon's /proc/<pid>/environ at execve, where it stays for the
+# life of the process and where the daemon cannot remove it. Each daemon reads
+# its own copy and unlinks it, so the file exists for the few milliseconds
+# between this write and daemon startup.
+SECRET_DIR="$(mktemp -d /tmp/box-secrets.XXXXXX)"
+chmod 700 "${SECRET_DIR}"
+
+stage_secret() {
+  local path="$1" value="$2"
+  (
+    umask 077
+    printf '%s' "${value}" >"${path}"
+  )
+  chmod 400 "${path}"
+}
+
+stage_secret "${SECRET_DIR}/exec.box_token" "${BOX_TOKEN_VALUE}"
+stage_secret "${SECRET_DIR}/exec.host_token" "${BOX_HOST_TOKEN_VALUE}"
+stage_secret "${SECRET_DIR}/host.box_token" "${BOX_TOKEN_VALUE}"
+stage_secret "${SECRET_DIR}/host.host_token" "${BOX_HOST_TOKEN_VALUE}"
+
+env BOX_TOKEN_FILE="${SECRET_DIR}/exec.box_token" \
+  BOX_HOST_TOKEN_FILE="${SECRET_DIR}/exec.host_token" \
+  box-exec &
 record $!
-env BOX_TOKEN="${BOX_TOKEN_VALUE}" BOX_HOST_TOKEN="${BOX_HOST_TOKEN_VALUE}" box-host &
+env BOX_TOKEN_FILE="${SECRET_DIR}/host.box_token" \
+  BOX_HOST_TOKEN_FILE="${SECRET_DIR}/host.host_token" \
+  box-host &
 record $!
+
+# Net for the case where a daemon dies before it unlinks its own copy.
+(
+  sleep 30
+  rm -rf "${SECRET_DIR}"
+) >/dev/null 2>&1 &
 
 BOX_TOKEN_VALUE=""
 BOX_HOST_TOKEN_VALUE=""
