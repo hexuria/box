@@ -4,7 +4,7 @@ info:
   description: |
     Guest HTTP wire for grok-box. Two processes share this document:
     box-exec (port 1337: exec, files, CUA) and box-host (port 1340: identity,
-    readiness, desktop/chrome status). Neither service performs model inference.
+    readiness, desktop/chrome/egress status). Neither service performs model inference.
     CUA coordinate space is the X framebuffer 1280x800, origin top-left.
     SDKs connect with caller-supplied exec URL, host URL, and token; they ignore
     /v1/info advertised URLs (those are container-local listen addresses).
@@ -218,6 +218,22 @@ components:
         profile: { type: string }
         cdp: { type: string, nullable: true }
         display: { type: string }
+    EgressStatus:
+      type: object
+      required: [enabled, ready, client_attached, protocol, ws, proxy]
+      properties:
+        enabled: { type: boolean }
+        ready:
+          type: boolean
+          description: A laptop client is attached; Chromium CONNECT is relayed
+        client_attached: { type: boolean }
+        protocol: { type: string, examples: [box-egress-v1] }
+        ws:
+          type: string
+          description: Container-local WS listen inventory, not a public connect URL
+        proxy:
+          type: string
+          description: Container-local CONNECT proxy (always loopback; never publish)
     Screenshot:
       type: object
       required: [encoding, mime, width, height, png_base64, bytes]
@@ -538,6 +554,13 @@ components:
               properties:
                 enabled: { type: boolean }
                 ready: { type: boolean }
+            egress_tunnel:
+              type: object
+              properties:
+                enabled: { type: boolean }
+                ready:
+                  type: boolean
+                  description: A laptop client is attached; CONNECT is relayed.
         endpoints:
           type: object
           properties:
@@ -838,6 +861,28 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ChromeStatus" }
+        "401":
+          description: Missing or wrong token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /v1/egress:
+    get:
+      tags: [host]
+      summary: Egress tunnel status (box-host)
+      description: |
+        Laptop CONNECT tunnel. enabled follows BOX_EGRESS_TUNNEL. ready /
+        client_attached mean a box-egress-tunnel client is attached.
+        Fail-closed CONNECT while enabled but not ready. ws/proxy are
+        container-local listens, not SDK connect URLs.
+      security: [{ bearer: [] }]
+      responses:
+        "200":
+          description: Tunnel inventory and client-attached flag
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EgressStatus" }
         "401":
           description: Missing or wrong token
           content:

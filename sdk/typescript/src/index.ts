@@ -336,6 +336,10 @@ export class GrokBox {
     return this.authJson("GET", `${this.hostUrl}/v1/chrome`);
   }
 
+  async egress(): Promise<unknown> {
+    return this.authJson("GET", `${this.hostUrl}/v1/egress`);
+  }
+
   async windows(): Promise<unknown> {
     return this.authJson("GET", `${this.hostUrl}/v1/desktop/windows`);
   }

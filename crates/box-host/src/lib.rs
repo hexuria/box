@@ -1,7 +1,7 @@
 //! Thin host gateway for grok-box (`box-host`).
 //!
 //! This process does **not** run inference. It advertises box identity,
-//! capabilities (exec, files, desktop, chrome, cua), and readiness of
+//! capabilities (exec, files, desktop, chrome, cua, egress_tunnel), and readiness of
 //! `box-exec` (and the X display when desktop is required). Heap: same
 //! mimalloc feature as `box-exec`.
 
@@ -22,6 +22,7 @@ use box_common::{
 };
 use box_cua::CuaConfig;
 use box_desktop::{DesktopConfig, DesktopStatus, WindowList};
+use box_egress_tunnel::{probe_egress, EgressConfig, EgressStatus};
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -39,6 +40,7 @@ pub struct AppState {
     pub desktop: DesktopConfig,
     pub chrome: ChromeConfig,
     pub cua: CuaConfig,
+    pub egress: EgressConfig,
     pub shutdown: Arc<Notify>,
     pub shutting_down: Arc<AtomicBool>,
     pub started_at: Instant,
@@ -56,6 +58,7 @@ impl AppState {
             desktop: DesktopConfig::from_env(),
             chrome: ChromeConfig::from_env(),
             cua: CuaConfig::from_env(),
+            egress: EgressConfig::from_env(),
             shutdown: Arc::new(Notify::new()),
             shutting_down: Arc::new(AtomicBool::new(false)),
             started_at: Instant::now(),
@@ -107,6 +110,7 @@ struct Capabilities {
     desktop: Capability,
     chrome: Capability,
     cua: Capability,
+    egress_tunnel: Capability,
 }
 
 #[derive(Serialize)]
@@ -124,6 +128,7 @@ pub fn app(state: AppState) -> Router {
         .route("/v1/desktop", get(desktop))
         .route("/v1/desktop/windows", get(windows))
         .route("/v1/chrome", get(chrome))
+        .route("/v1/egress", get(egress))
         .route("/v1/busy", get(busy))
         .route("/v1/shutdown", post(shutdown))
         .route("/v1/metrics", get(metrics))
@@ -223,6 +228,13 @@ async fn info(State(state): State<AppState>) -> Json<InfoResponse> {
                 enabled: state.cua.enabled,
                 ready: state.cua.capability_ready(),
             },
+            egress_tunnel: {
+                let st = probe_egress(&state.egress);
+                Capability {
+                    enabled: st.enabled,
+                    ready: st.ready,
+                }
+            },
         },
         endpoints: Endpoints {
             exec: container_local_http_url(state.exec_bind),
@@ -240,6 +252,10 @@ async fn desktop(State(state): State<AppState>) -> Json<DesktopStatus> {
 
 async fn chrome(State(state): State<AppState>) -> Json<ChromeStatus> {
     Json(probe_chrome(&state.chrome))
+}
+
+async fn egress(State(state): State<AppState>) -> Json<EgressStatus> {
+    Json(probe_egress(&state.egress))
 }
 
 async fn windows(State(state): State<AppState>) -> Json<WindowList> {
@@ -393,6 +409,7 @@ mod tests {
             desktop: DesktopConfig::disabled(),
             chrome: ChromeConfig::disabled(),
             cua: CuaConfig::disabled(),
+            egress: EgressConfig::disabled(),
             shutdown: Arc::new(Notify::new()),
             shutting_down: Arc::new(AtomicBool::new(false)),
             started_at: Instant::now(),
@@ -505,9 +522,28 @@ mod tests {
         assert_eq!(body["capabilities"]["chrome"]["ready"], false);
         assert_eq!(body["capabilities"]["cua"]["enabled"], false);
         assert_eq!(body["capabilities"]["cua"]["ready"], false);
+        assert_eq!(body["capabilities"]["egress_tunnel"]["enabled"], false);
+        assert_eq!(body["capabilities"]["egress_tunnel"]["ready"], false);
         assert_eq!(body["endpoints"]["exec"], "http://127.0.0.1:1337");
         assert_eq!(body["endpoints"]["host"], "http://127.0.0.1:1340");
         assert_eq!(body["endpoints"]["scope"], "container-local");
+    }
+
+    #[tokio::test]
+    async fn egress_ok_when_disabled() {
+        let (status, body) = send(
+            Request::builder()
+                .uri("/v1/egress")
+                .header("authorization", "Bearer host-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["enabled"], false);
+        assert_eq!(body["ready"], false);
+        assert_eq!(body["client_attached"], false);
+        assert_eq!(body["protocol"], "box-egress-v1");
     }
 
     #[tokio::test]

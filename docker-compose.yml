@@ -40,10 +40,18 @@ services:
       BOX_EXEC_BIND: 0.0.0.0:1337
       BOX_HOST_BIND: 0.0.0.0:1340
       BOX_MAX_CONCURRENT_EXECS: ${BOX_MAX_CONCURRENT_EXECS:-8}
+      # Off by default. See docs/EGRESS.md. Never publish the CONNECT proxy (8791).
+      BOX_EGRESS_TUNNEL: ${BOX_EGRESS_TUNNEL:-0}
+      BOX_EGRESS_WS_BIND: ${BOX_EGRESS_WS_BIND:-0.0.0.0:8790}
+      BOX_EGRESS_PROXY_BIND: ${BOX_EGRESS_PROXY_BIND:-127.0.0.1:8791}
+      BOX_EGRESS_ADMIN_BIND: ${BOX_EGRESS_ADMIN_BIND:-127.0.0.1:8792}
+      BOX_EGRESS_TUNNEL_BEARER_FILE: ${BOX_EGRESS_TUNNEL_BEARER_FILE:-}
+      BOX_EGRESS_RELAY_HOSTS: ${BOX_EGRESS_RELAY_HOSTS:-}
     ports:
       - "127.0.0.1:1337:1337"
       - "127.0.0.1:1340:1340"
       - "127.0.0.1:6080:6080"
+      - "127.0.0.1:8790:8790"
     volumes:
       - ./workspace-data:/workspace
       - ./chrome-profile:/home/box/chrome-profile

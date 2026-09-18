@@ -114,6 +114,9 @@ This guest is **RAM-heavy**: Debian + Xvfb + openbox + Chromium + two Rust daemo
 | **1337** | Compose yes (`127.0.0.1`) | `box-exec` — Bearer `BOX_TOKEN` except `GET /v1/health` |
 | **1340** | Compose yes (`127.0.0.1`) | `box-host` — Bearer except `GET /v1/health`. **`GET /v1/ready` requires Bearer.** |
 | **6080** | Compose yes (`127.0.0.1`) | noVNC `/vnc.html` — **not** Bearer; VNC password is `BOX_VNC_PASSWORD` (x11vnc 8-char max) |
+| **8790** | Compose yes (`127.0.0.1`) | `box-egress-tunnel` WS (off unless `BOX_EGRESS_TUNNEL=1`). See [EGRESS.md](EGRESS.md). |
+| 8791 | **no** | Chromium CONNECT proxy |
+| 8792 | **no** | tunnel admin (box-host probe) |
 | 5900 | **no** | x11vnc, `127.0.0.1` inside the container |
 | 9222 | **no** | Chromium CDP, `127.0.0.1` only |
 
@@ -137,6 +140,7 @@ noVNC is a **full desktop session** (keyboard/mouse on 1280×800). Treat **6080*
       -L 1337:127.0.0.1:1337 \
       -L 1340:127.0.0.1:1340 \
       -L 6080:127.0.0.1:6080 \
+      -L 8790:127.0.0.1:8790 \
       root@VM_IPV4
     ```
 
@@ -153,6 +157,7 @@ services:
       - "127.0.0.1:1337:1337"
       - "127.0.0.1:1340:1340"
       - "127.0.0.1:6080:6080"
+      - "127.0.0.1:8790:8790"
 ```
 
 Loopback bind + SSH tunnel is the tightest combo. Loopback bind **breaks** “dial the Tailscale IP :1337” (Tailscale is not `127.0.0.1`); use the tunnel over Tailscale SSH instead.
@@ -340,7 +345,7 @@ resource "linode_firewall" "box" {
 output "ipv4" { value = linode_instance.box.ip_address }
 output "ssh" { value = "ssh root@${linode_instance.box.ip_address}" }
 output "tunnel" {
-  value = "ssh -N -L 1337:127.0.0.1:1337 -L 1340:127.0.0.1:1340 -L 6080:127.0.0.1:6080 root@${linode_instance.box.ip_address}"
+  value = "ssh -N -L 1337:127.0.0.1:1337 -L 1340:127.0.0.1:1340 -L 6080:127.0.0.1:6080 -L 8790:127.0.0.1:8790 root@${linode_instance.box.ip_address}"
 }
 ```
 
@@ -433,6 +438,7 @@ After the Akamai VM is up and Compose is healthy:
 - **Cost:** an idle VM still bills. Power off or `tofu destroy` / Cloud Manager delete when done. Hourly on 8 GB Shared is on the order of **seven cents**. A forgotten month is **~$48**.
 - **CORS:** default is no browser origins. Do not point a random website at 1337.
 - **CDP unpublished.** Do not add `9222:9222` to Compose.
+- **Egress CONNECT unpublished.** Do not add `8791:8791`. WS `8790` is loopback + SSH `-L` only. Prod must not rely on Docker host-network for Facebook/IP geo; see [EGRESS.md](EGRESS.md).
 - Path 2 demos: EnsureBox token (`ENSUREBOX_TOKEN`) is **not** `BOX_TOKEN`. npm scripts bind L1/EnsureBox to **127.0.0.1**. Both demos require login tokens (`ENSUREBOX_TOKEN` / `L1_TOKEN`). EnsureBox needs **host Docker** as the current user (no sudo fallback). Operator viewer URLs are loopback noVNC; L1 does not receive them.
 
 ---

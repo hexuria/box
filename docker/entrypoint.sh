@@ -51,6 +51,11 @@ export BOX_CUA="${BOX_CUA:-1}"
 # works. Host publish is 127.0.0.1 (see docker-compose.yml).
 export BOX_EXEC_BIND="${BOX_EXEC_BIND:-0.0.0.0:1337}"
 export BOX_HOST_BIND="${BOX_HOST_BIND:-0.0.0.0:1340}"
+export BOX_EGRESS_TUNNEL="${BOX_EGRESS_TUNNEL:-0}"
+export BOX_EGRESS_WS_BIND="${BOX_EGRESS_WS_BIND:-0.0.0.0:8790}"
+export BOX_EGRESS_PROXY_BIND="${BOX_EGRESS_PROXY_BIND:-127.0.0.1:8791}"
+export BOX_EGRESS_ADMIN_BIND="${BOX_EGRESS_ADMIN_BIND:-127.0.0.1:8792}"
+export BOX_EGRESS_PROXY_PORT="${BOX_EGRESS_PROXY_PORT:-${BOX_EGRESS_PROXY_BIND##*:}}"
 
 mkdir -p "${WORKSPACE_ROOT}" "${BOX_CHROME_PROFILE}"
 
@@ -58,6 +63,15 @@ flag_on() {
   local v
   v="$(echo "${1:-}" | tr '[:upper:]' '[:lower:]')"
   [[ "${v}" != "0" && "${v}" != "false" && "${v}" != "off" && "${v}" != "no" ]]
+}
+
+stage_secret() {
+  local path="$1" value="$2"
+  (
+    umask 077
+    printf '%s' "${value}" >"${path}"
+  )
+  chmod 400 "${path}"
 }
 
 display_num() {
@@ -87,7 +101,7 @@ record() {
 shutdown() {
   echo "grok-box shutting down"
   local pid
-  rm -rf "${SECRET_DIR:-}" 2>/dev/null || true
+  rm -rf "${SECRET_DIR:-}" "${EGRESS_SECRET_DIR:-}" 2>/dev/null || true
   if [[ -f /tmp/box-chrome.pid ]]; then
     kill -TERM "$(cat /tmp/box-chrome.pid)" 2>/dev/null || true
   fi
@@ -216,6 +230,14 @@ start_chrome() {
   # infobar. managed policy + --test-type hide the remaining --no-sandbox warning
   # so CUA screenshots are a usable desktop, not a banner.
   # Closing/crashing the browser must not take the box down — restart it.
+  local proxy_args=()
+  if flag_on "${BOX_EGRESS_TUNNEL}"; then
+    echo "chromium proxy=http://127.0.0.1:${BOX_EGRESS_PROXY_PORT} (box-egress-tunnel)"
+    proxy_args+=(
+      --proxy-server="http://127.0.0.1:${BOX_EGRESS_PROXY_PORT}"
+      --proxy-bypass-list="localhost;127.0.0.1;[::1];<-loopback>"
+    )
+  fi
   (
     while true; do
       "${bin}" \
@@ -234,6 +256,7 @@ start_chrome() {
         --window-position=0,0 \
         --remote-debugging-address=127.0.0.1 \
         --remote-debugging-port="${BOX_CDP_PORT}" \
+        "${proxy_args[@]}" \
         about:blank \
         >/tmp/box-chrome.log 2>&1 &
       echo $! > /tmp/box-chrome.pid
@@ -244,10 +267,59 @@ start_chrome() {
   ) &
 }
 
-echo "grok-box starting box_id=${BOX_ID:-grok-box} workspace=${WORKSPACE_ROOT} desktop=${BOX_DESKTOP} chrome=${BOX_CHROME} cua=${BOX_CUA}"
+start_egress() {
+  local bearer path n admin_port
+  bearer="$(read_secret BOX_EGRESS_TUNNEL_BEARER)"
+  if [[ -z "${bearer}" ]]; then
+    echo "BOX_EGRESS_TUNNEL=1 requires BOX_EGRESS_TUNNEL_BEARER or BOX_EGRESS_TUNNEL_BEARER_FILE" >&2
+    exit 1
+  fi
+  # Same story as BOX_TOKEN: a value in pid 1's environ is /proc-visible for
+  # life. Unset after the copy; hand the daemon a staged file, never a value.
+  unset BOX_EGRESS_TUNNEL_BEARER || true
+
+  EGRESS_SECRET_DIR="$(mktemp -d /tmp/box-egress-secrets.XXXXXX)"
+  chmod 700 "${EGRESS_SECRET_DIR}"
+  path="${EGRESS_SECRET_DIR}/bearer"
+  stage_secret "${path}" "${bearer}"
+  bearer=""
+
+  admin_port="${BOX_EGRESS_ADMIN_BIND##*:}"
+  echo "starting box-egress-tunnel server ws=${BOX_EGRESS_WS_BIND} proxy=${BOX_EGRESS_PROXY_BIND} admin=127.0.0.1:${admin_port}"
+  env BOX_EGRESS_WS_BIND="${BOX_EGRESS_WS_BIND}" \
+    BOX_EGRESS_PROXY_BIND="${BOX_EGRESS_PROXY_BIND}" \
+    BOX_EGRESS_ADMIN_BIND="${BOX_EGRESS_ADMIN_BIND}" \
+    box-egress-tunnel server \
+      --ws-bind "${BOX_EGRESS_WS_BIND}" \
+      --proxy-bind "${BOX_EGRESS_PROXY_BIND}" \
+      --admin-bind "${BOX_EGRESS_ADMIN_BIND}" \
+      --bearer-file "${path}" \
+      >/tmp/box-egress-tunnel.log 2>&1 &
+  record $!
+
+  n=0
+  while [[ ${n} -lt 50 ]]; do
+    if curl -fsS "http://127.0.0.1:${admin_port}/v1/status" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.1
+    n=$((n + 1))
+  done
+  if ! curl -fsS "http://127.0.0.1:${admin_port}/v1/status" >/dev/null 2>&1; then
+    echo "box-egress-tunnel did not become ready (see /tmp/box-egress-tunnel.log)" >&2
+    exit 1
+  fi
+}
+
+echo "grok-box starting box_id=${BOX_ID:-grok-box} workspace=${WORKSPACE_ROOT} desktop=${BOX_DESKTOP} chrome=${BOX_CHROME} cua=${BOX_CUA} egress=${BOX_EGRESS_TUNNEL}"
 
 if flag_on "${BOX_DESKTOP}"; then
   start_desktop
+fi
+if flag_on "${BOX_EGRESS_TUNNEL}"; then
+  start_egress
+fi
+if flag_on "${BOX_DESKTOP}"; then
   if flag_on "${BOX_CHROME}"; then
     start_chrome
   fi
@@ -260,15 +332,6 @@ fi
 # between this write and daemon startup.
 SECRET_DIR="$(mktemp -d /tmp/box-secrets.XXXXXX)"
 chmod 700 "${SECRET_DIR}"
-
-stage_secret() {
-  local path="$1" value="$2"
-  (
-    umask 077
-    printf '%s' "${value}" >"${path}"
-  )
-  chmod 400 "${path}"
-}
 
 stage_secret "${SECRET_DIR}/exec.box_token" "${BOX_TOKEN_VALUE}"
 stage_secret "${SECRET_DIR}/exec.host_token" "${BOX_HOST_TOKEN_VALUE}"

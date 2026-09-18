@@ -59,6 +59,8 @@ enum Commands {
     Desktop,
     /// GET host /v1/chrome
     Chrome,
+    /// GET host /v1/egress
+    Egress,
     /// GET host /v1/desktop/windows
     Windows,
     /// GET exec /v1/busy
@@ -308,6 +310,7 @@ async fn main() -> Result<()> {
         },
         Commands::Desktop => print_json(&box_client.desktop().await?)?,
         Commands::Chrome => print_json(&box_client.chrome().await?)?,
+        Commands::Egress => print_json(&box_client.egress().await?)?,
         Commands::Windows => print_json(&box_client.windows().await?)?,
         Commands::Busy => print_json(&box_client.busy().await?)?,
         Commands::Metrics => print_json(&box_client.metrics().await?)?,

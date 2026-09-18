@@ -93,7 +93,12 @@ impl BoxConfig {
 }
 
 /// Names that carry a secret *value*.
-pub const SECRET_ENV_KEYS: &[&str] = &["BOX_TOKEN", "BOX_HOST_TOKEN", "BOX_VNC_PASSWORD"];
+pub const SECRET_ENV_KEYS: &[&str] = &[
+    "BOX_TOKEN",
+    "BOX_HOST_TOKEN",
+    "BOX_VNC_PASSWORD",
+    "BOX_EGRESS_TUNNEL_BEARER",
+];
 
 /// Names that carry a *path* to a secret. Not secret themselves, but a file
 /// the daemon failed to unlink should not also be advertised.
@@ -101,6 +106,7 @@ pub const SECRET_FILE_ENV_KEYS: &[&str] = &[
     "BOX_TOKEN_FILE",
     "BOX_HOST_TOKEN_FILE",
     "BOX_VNC_PASSWORD_FILE",
+    "BOX_EGRESS_TUNNEL_BEARER_FILE",
 ];
 
 /// Remove the secret variables from this process's `getenv` view.
@@ -120,8 +126,9 @@ pub const SECRET_FILE_ENV_KEYS: &[&str] = &[
 ///
 /// To keep a secret out of `/proc/<pid>/environ` it has to never enter the
 /// environment in the first place. Deliver it as `BOX_TOKEN_FILE` /
-/// `BOX_HOST_TOKEN_FILE` / `BOX_VNC_PASSWORD_FILE`; the daemon reads the file
-/// and unlinks it. See README §Auth for the residual exposure.
+/// `BOX_HOST_TOKEN_FILE` / `BOX_VNC_PASSWORD_FILE` /
+/// `BOX_EGRESS_TUNNEL_BEARER_FILE`; the daemon reads the file and unlinks it.
+/// See README §Auth for the residual exposure.
 pub fn wipe_secret_environ() {
     for key in SECRET_ENV_KEYS.iter().chain(SECRET_FILE_ENV_KEYS.iter()) {
         env::remove_var(key);
@@ -137,6 +144,15 @@ pub fn wipe_secret_environ() {
 /// the difference between "the secret existed for 10 ms" and "the secret is a
 /// `cat` away for the life of the box".
 fn secret_from_env(name: &str) -> Result<Option<String>, ConfigError> {
+    read_secret_from_env(name, true)
+}
+
+/// Read `<name>_FILE` (preferred) or `<name>`.
+///
+/// Guest daemons pass `unlink_file = true` so a staged tmpfs copy exists only
+/// until the process is up. Clients on the operator's machine pass `false` so
+/// a bearer file they still need is not deleted out from under them.
+pub fn read_secret_from_env(name: &str, unlink_file: bool) -> Result<Option<String>, ConfigError> {
     let file_var = format!("{name}_FILE");
     let Some(path) = crate::env_nonempty(&file_var) else {
         return Ok(crate::env_nonempty(name));
@@ -146,12 +162,14 @@ fn secret_from_env(name: &str) -> Result<Option<String>, ConfigError> {
             "{file_var} is set to {path} but that file could not be read: {err}"
         ))
     })?;
-    if let Err(err) = std::fs::remove_file(&path) {
-        tracing::warn!(
-            var = %file_var,
-            error = %err,
-            "secret file could not be unlinked; it stays readable to anything running as this uid"
-        );
+    if unlink_file {
+        if let Err(err) = std::fs::remove_file(&path) {
+            tracing::warn!(
+                var = %file_var,
+                error = %err,
+                "secret file could not be unlinked; it stays readable to anything running as this uid"
+            );
+        }
     }
     let value = raw.trim().to_string();
     Ok(if value.is_empty() { None } else { Some(value) })
@@ -163,17 +181,27 @@ fn validate_token(
     exec_bind: SocketAddr,
     host_bind: SocketAddr,
 ) -> Result<(), ConfigError> {
+    ensure_token_strength(name, token, binds_are_loopback(exec_bind, host_bind))
+}
+
+/// Reject empty, short, or well-known tokens unless `BOX_ALLOW_INSECURE_DEV=1`
+/// and every relevant bind is loopback.
+pub fn ensure_token_strength(
+    name: &str,
+    token: &str,
+    binds_are_loopback: bool,
+) -> Result<(), ConfigError> {
     if !token_is_insecure(token) {
         return Ok(());
     }
-    if allow_insecure_dev() && binds_are_loopback(exec_bind, host_bind) {
+    if allow_insecure_dev() && binds_are_loopback {
         tracing::warn!(
             "{name} is a well-known, empty, or short value; accepted because BOX_ALLOW_INSECURE_DEV=1 and binds are loopback"
         );
         return Ok(());
     }
     Err(ConfigError(format!(
-        "{name} is missing, shorter than {MIN_TOKEN_LEN} characters, or a well-known insecure value ({DEV_BOX_TOKEN}). Set a long random token, or BOX_ALLOW_INSECURE_DEV=1 with loopback BOX_EXEC_BIND and BOX_HOST_BIND for local demos."
+        "{name} is missing, shorter than {MIN_TOKEN_LEN} characters, or a well-known insecure value ({DEV_BOX_TOKEN}). Set a long random token, or BOX_ALLOW_INSECURE_DEV=1 with loopback binds for local demos."
     )))
 }
 

@@ -139,7 +139,7 @@ L1 uses `L1_TOKEN` for the human session and `ENSUREBOX_TOKEN` only on the serve
 
 1. `docker run` (or equivalent) from this image.
 2. Inject `BOX_TOKEN`, `BOX_VNC_PASSWORD`, `BOX_ID`, desktop/chrome/CUA env as needed.
-3. Publish 1337, 1340, 6080 on **127.0.0.1** (or a tunnel). Never 5900/9222.
+3. Publish 1337, 1340, 6080 on **127.0.0.1** (or a tunnel). Never 5900/9222/8791. Optional `8790` when `BOX_EGRESS_TUNNEL=1` ([EGRESS.md](EGRESS.md)).
 4. Poll `GET {hostUrl}/v1/ready` with Bearer until 200.
 5. `GrokBox.connect(execUrl, hostUrl, token)` — the URLs **you** published, not `/v1/info`.
 

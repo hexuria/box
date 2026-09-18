@@ -11,8 +11,8 @@ COPY Cargo.toml rust-toolchain.toml ./
 COPY crates ./crates
 COPY Cargo.lock* ./
 
-RUN cargo build --release -p box-exec -p box-host \
-    && strip target/release/box-exec target/release/box-host
+RUN cargo build --release -p box-exec -p box-host -p box-egress-tunnel \
+    && strip target/release/box-exec target/release/box-host target/release/box-egress-tunnel
 
 FROM debian:bookworm-slim AS runtime
 
@@ -55,6 +55,7 @@ RUN apt-get update \
 
 COPY --from=builder /src/target/release/box-exec /usr/local/bin/box-exec
 COPY --from=builder /src/target/release/box-host /usr/local/bin/box-host
+COPY --from=builder /src/target/release/box-egress-tunnel /usr/local/bin/box-egress-tunnel
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY docker/websockify-nodelay.py /usr/local/bin/websockify-nodelay
 COPY docker/box-reset-desktop.sh /usr/local/bin/box-reset-desktop
@@ -76,6 +77,7 @@ COPY --chown=box:box docker/xfce/launchers/terminal.desktop /home/box/.config/xf
 COPY docker/xfce/wallpaper.png /usr/share/backgrounds/grok-box.png
 # chromium-launch.sh is intentionally not installed. Entrypoint owns Chromium.
 RUN chmod 755 /usr/local/bin/entrypoint.sh /usr/local/bin/websockify-nodelay /usr/local/bin/box-exec /usr/local/bin/box-host \
+        /usr/local/bin/box-egress-tunnel \
         /usr/local/bin/box-reset-desktop /usr/local/bin/box-release-keys /usr/local/bin/box-chromium \
     && chown -R box:box /home/box/.config
 
@@ -94,12 +96,16 @@ ENV WORKSPACE_ROOT=/workspace \
     BOX_CHROME_PROFILE=/home/box/chrome-profile \
     BOX_CDP_PORT=9222 \
     BOX_CUA=1 \
+    BOX_EGRESS_TUNNEL=0 \
+    BOX_EGRESS_WS_BIND=0.0.0.0:8790 \
+    BOX_EGRESS_PROXY_BIND=127.0.0.1:8791 \
+    BOX_EGRESS_ADMIN_BIND=127.0.0.1:8792 \
     DISPLAY=:1 \
     HOME=/home/box \
     RUST_LOG=info
 
 USER box
 WORKDIR /workspace
-EXPOSE 1337 1340 6080
+EXPOSE 1337 1340 6080 8790
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
