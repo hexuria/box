@@ -1,0 +1,523 @@
+//! Guest tunnel server: WebSocket mux + HTTP CONNECT proxy + loopback admin.
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use futures_util::{SinkExt, StreamExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{mpsc, oneshot};
+use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
+use tokio_tungstenite::tungstenite::http::{header, HeaderValue, StatusCode};
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{accept_hdr_async, WebSocketStream};
+
+use box_common::{parse_bearer, tokens_equal};
+
+use crate::config::TunnelServerConfig;
+use crate::http1::{parse_proxy_request, read_http_head};
+use crate::protocol::{decode_data, encode_data, ControlMsg, PROTOCOL_NAME};
+use crate::status::{format_bind, EgressStatus};
+
+const OPEN_TIMEOUT: Duration = Duration::from_secs(15);
+const MAX_STREAMS: usize = 256;
+const CHUNK: usize = 32 * 1024;
+
+enum WsOut {
+    Control(ControlMsg),
+    Data { id: u32, payload: Vec<u8> },
+}
+
+struct StreamSlot {
+    from_client: mpsc::Sender<Vec<u8>>,
+    opened: Option<oneshot::Sender<Result<(), String>>>,
+}
+
+struct ClientSession {
+    generation: u64,
+    outgoing: mpsc::Sender<WsOut>,
+    streams: HashMap<u32, StreamSlot>,
+    next_id: u32,
+}
+
+struct Shared {
+    cfg: TunnelServerConfig,
+    attached: AtomicBool,
+    generation: AtomicU64,
+    session: Mutex<Option<ClientSession>>,
+    ws_addr: std::net::SocketAddr,
+    proxy_addr: std::net::SocketAddr,
+}
+
+impl Shared {
+    fn snapshot(&self) -> EgressStatus {
+        let attached = self.attached.load(Ordering::SeqCst);
+        EgressStatus {
+            enabled: true,
+            ready: attached,
+            client_attached: attached,
+            protocol: PROTOCOL_NAME.to_string(),
+            ws: format_bind(self.ws_addr),
+            proxy: format_bind(self.proxy_addr),
+        }
+    }
+}
+
+pub struct ServerBinds {
+    pub ws: TcpListener,
+    pub proxy: TcpListener,
+    pub admin: TcpListener,
+}
+
+impl ServerBinds {
+    pub async fn bind(cfg: &TunnelServerConfig) -> std::io::Result<Self> {
+        let ws = TcpListener::bind(cfg.ws_bind).await?;
+        let proxy = TcpListener::bind(cfg.proxy_bind).await?;
+        let admin = TcpListener::bind(cfg.admin_bind).await?;
+        Ok(Self { ws, proxy, admin })
+    }
+}
+
+pub async fn run(cfg: TunnelServerConfig) -> anyhow::Result<()> {
+    let binds = ServerBinds::bind(&cfg).await?;
+    run_with_binds(cfg, binds).await
+}
+
+pub async fn run_with_binds(cfg: TunnelServerConfig, binds: ServerBinds) -> anyhow::Result<()> {
+    let ws_addr = binds.ws.local_addr()?;
+    let proxy_addr = binds.proxy.local_addr()?;
+    let admin_addr = binds.admin.local_addr()?;
+    tracing::info!(
+        %ws_addr,
+        %proxy_addr,
+        %admin_addr,
+        protocol = PROTOCOL_NAME,
+        "box-egress-tunnel server listening"
+    );
+    let shared = Arc::new(Shared {
+        cfg,
+        attached: AtomicBool::new(false),
+        generation: AtomicU64::new(0),
+        session: Mutex::new(None),
+        ws_addr,
+        proxy_addr,
+    });
+
+    loop {
+        tokio::select! {
+            accepted = binds.ws.accept() => {
+                let (stream, peer) = accepted?;
+                let shared = shared.clone();
+                tokio::spawn(async move {
+                    if let Err(err) = handle_ws(shared, stream, peer).await {
+                        tracing::debug!(error = %err, %peer, "ws session ended");
+                    }
+                });
+            }
+            accepted = binds.proxy.accept() => {
+                let (stream, peer) = accepted?;
+                let shared = shared.clone();
+                tokio::spawn(async move {
+                    if let Err(err) = handle_proxy(shared, stream).await {
+                        tracing::debug!(error = %err, %peer, "proxy session ended");
+                    }
+                });
+            }
+            accepted = binds.admin.accept() => {
+                let (stream, _) = accepted?;
+                let shared = shared.clone();
+                tokio::spawn(async move {
+                    let _ = handle_admin(shared, stream).await;
+                });
+            }
+        }
+    }
+}
+
+async fn handle_admin(shared: Arc<Shared>, mut stream: TcpStream) -> std::io::Result<()> {
+    let mut buf = vec![0u8; 1024];
+    let n = stream.read(&mut buf).await?;
+    let req = String::from_utf8_lossy(&buf[..n]);
+    let (status, body) = if req.starts_with("GET /v1/health") {
+        (200, b"{\"status\":\"ok\"}".to_vec())
+    } else if req.starts_with("GET /v1/status") {
+        (
+            200,
+            serde_json::to_vec(&shared.snapshot()).unwrap_or_else(|_| b"{}".to_vec()),
+        )
+    } else {
+        (404, b"{\"error\":\"not_found\"}".to_vec())
+    };
+    let reason = match status {
+        200 => "OK",
+        _ => "Not Found",
+    };
+    let header = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(header.as_bytes()).await?;
+    stream.write_all(&body).await?;
+    Ok(())
+}
+
+async fn handle_ws(
+    shared: Arc<Shared>,
+    stream: TcpStream,
+    peer: std::net::SocketAddr,
+) -> anyhow::Result<()> {
+    let bearer = shared.cfg.bearer.clone();
+    let ws = accept_hdr_async(stream, |req: &Request, mut response: Response| {
+        if !authorized(req, &bearer) {
+            let mut resp = ErrorResponse::new(Some("unauthorized\n".to_string()));
+            *resp.status_mut() = StatusCode::UNAUTHORIZED;
+            return Err(resp);
+        }
+        if let Some(val) = req.headers().get("sec-websocket-protocol") {
+            if let Ok(s) = val.to_str() {
+                if s.split(',').any(|p| p.trim() == PROTOCOL_NAME) {
+                    response.headers_mut().insert(
+                        header::SEC_WEBSOCKET_PROTOCOL,
+                        HeaderValue::from_static(PROTOCOL_NAME),
+                    );
+                }
+            }
+        }
+        Ok(response)
+    })
+    .await?;
+
+    tracing::info!(%peer, "egress client attached");
+    serve_client(shared, ws).await;
+    tracing::info!(%peer, "egress client detached");
+    Ok(())
+}
+
+fn authorized(req: &Request, expected: &str) -> bool {
+    let presented = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(parse_bearer)
+        .or_else(|| {
+            req.headers()
+                .get("x-box-egress-bearer")
+                .and_then(|v| v.to_str().ok())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        });
+    match presented {
+        Some(token) => tokens_equal(token, expected),
+        None => false,
+    }
+}
+
+async fn serve_client<S>(shared: Arc<Shared>, ws: WebSocketStream<S>)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let (mut sink, mut stream) = ws.split();
+    let (out_tx, mut out_rx) = mpsc::channel::<WsOut>(256);
+    let generation = shared.generation.fetch_add(1, Ordering::SeqCst) + 1;
+    {
+        let mut g = shared.session.lock().unwrap_or_else(|e| e.into_inner());
+        *g = Some(ClientSession {
+            generation,
+            outgoing: out_tx.clone(),
+            streams: HashMap::new(),
+            next_id: 0,
+        });
+        shared.attached.store(true, Ordering::SeqCst);
+    }
+
+    let _ = out_tx
+        .send(WsOut::Control(ControlMsg::hello("server")))
+        .await;
+
+    let writer = tokio::spawn(async move {
+        while let Some(msg) = out_rx.recv().await {
+            let frame = match msg {
+                WsOut::Control(ctrl) => match serde_json::to_string(&ctrl) {
+                    Ok(text) => Message::Text(text.into()),
+                    Err(_) => continue,
+                },
+                WsOut::Data { id, payload } => Message::Binary(encode_data(id, &payload).into()),
+            };
+            if sink.send(frame).await.is_err() {
+                break;
+            }
+        }
+        let _ = sink.send(Message::Close(None)).await;
+    });
+
+    while let Some(frame) = stream.next().await {
+        let Ok(frame) = frame else {
+            break;
+        };
+        match frame {
+            Message::Text(text) => {
+                if let Ok(msg) = serde_json::from_str::<ControlMsg>(&text) {
+                    if msg.wire_ok() {
+                        on_control(&shared, msg);
+                    }
+                }
+            }
+            Message::Binary(bin) => {
+                if let Some((id, payload)) = decode_data(&bin) {
+                    let tx = {
+                        let g = shared.session.lock().unwrap_or_else(|e| e.into_inner());
+                        g.as_ref()
+                            .and_then(|s| s.streams.get(&id))
+                            .map(|slot| slot.from_client.clone())
+                    };
+                    if let Some(tx) = tx {
+                        let _ = tx.send(payload.to_vec()).await;
+                    }
+                }
+            }
+            Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
+            Message::Close(_) => break,
+        }
+    }
+
+    writer.abort();
+    let mut g = shared.session.lock().unwrap_or_else(|e| e.into_inner());
+    if g.as_ref().is_some_and(|s| s.generation == generation) {
+        *g = None;
+        shared.attached.store(false, Ordering::SeqCst);
+    }
+}
+
+fn on_control(shared: &Shared, msg: ControlMsg) {
+    let Some(id) = msg.stream_id() else {
+        return;
+    };
+    let mut g = shared.session.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(session) = g.as_mut() else {
+        return;
+    };
+    match msg {
+        ControlMsg::Opened { .. } => {
+            if let Some(slot) = session.streams.get_mut(&id) {
+                if let Some(tx) = slot.opened.take() {
+                    let _ = tx.send(Ok(()));
+                }
+            }
+        }
+        ControlMsg::Error { message, .. } => {
+            if let Some(slot) = session.streams.get_mut(&id) {
+                if let Some(tx) = slot.opened.take() {
+                    let _ = tx.send(Err(message));
+                }
+            }
+            session.streams.remove(&id);
+        }
+        ControlMsg::Close { .. } => {
+            session.streams.remove(&id);
+        }
+        ControlMsg::Hello { .. } | ControlMsg::Open { .. } => {}
+    }
+}
+
+async fn handle_proxy(shared: Arc<Shared>, mut stream: TcpStream) -> anyhow::Result<()> {
+    let (head, rest) = match read_http_head(&mut stream).await {
+        Ok(v) => v,
+        Err(_) => {
+            let _ = write_http(&mut stream, 400, "Bad Request", "bad request\n").await;
+            return Ok(());
+        }
+    };
+    let Some(req) = parse_proxy_request(&head, &rest) else {
+        let _ = write_http(&mut stream, 400, "Bad Request", "bad request\n").await;
+        return Ok(());
+    };
+
+    if !shared.cfg.allowlist.allows(&req.host) {
+        tracing::info!(host = %req.host, port = req.port, "CONNECT host not in allowlist");
+        let _ = write_http(&mut stream, 403, "Forbidden", "host not allowed\n").await;
+        return Ok(());
+    }
+
+    let prepared = {
+        let mut g = shared.session.lock().unwrap_or_else(|e| e.into_inner());
+        match g.as_mut() {
+            Some(session) if session.streams.len() < MAX_STREAMS => alloc_id(session).map(|id| {
+                let (from_tx, from_rx) = mpsc::channel(32);
+                let (opened_tx, opened_rx) = oneshot::channel();
+                session.streams.insert(
+                    id,
+                    StreamSlot {
+                        from_client: from_tx,
+                        opened: Some(opened_tx),
+                    },
+                );
+                (id, from_rx, opened_rx, session.outgoing.clone())
+            }),
+            _ => None,
+        }
+    };
+    let Some((id, from_client_rx, opened_rx, outgoing)) = prepared else {
+        let _ = write_http(
+            &mut stream,
+            503,
+            "Service Unavailable",
+            "box-egress-tunnel: no client attached\n",
+        )
+        .await;
+        return Ok(());
+    };
+
+    if outgoing
+        .send(WsOut::Control(ControlMsg::open(
+            id,
+            req.host.clone(),
+            req.port,
+        )))
+        .await
+        .is_err()
+    {
+        drop_stream(&shared, id);
+        let _ = write_http(
+            &mut stream,
+            503,
+            "Service Unavailable",
+            "box-egress-tunnel: no client attached\n",
+        )
+        .await;
+        return Ok(());
+    }
+
+    let opened = tokio::time::timeout(OPEN_TIMEOUT, opened_rx).await;
+    match opened {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(message))) => {
+            drop_stream(&shared, id);
+            let _ = write_http(&mut stream, 502, "Bad Gateway", &format!("{message}\n")).await;
+            return Ok(());
+        }
+        Ok(Err(_)) | Err(_) => {
+            let _ = outgoing
+                .send(WsOut::Control(ControlMsg::close(id, Some("open-timeout"))))
+                .await;
+            drop_stream(&shared, id);
+            let _ = write_http(
+                &mut stream,
+                504,
+                "Gateway Timeout",
+                "client did not open the stream\n",
+            )
+            .await;
+            return Ok(());
+        }
+    }
+
+    if req.connect {
+        stream
+            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            .await?;
+    }
+
+    tracing::info!(
+        host = %req.host,
+        port = req.port,
+        id,
+        connect = req.connect,
+        "relaying CONNECT"
+    );
+    let _ = stream.set_nodelay(true);
+    copy_proxy_stream(stream, from_client_rx, outgoing, id, req.initial).await;
+    drop_stream(&shared, id);
+    Ok(())
+}
+
+fn alloc_id(session: &mut ClientSession) -> Option<u32> {
+    for _ in 0..MAX_STREAMS + 8 {
+        session.next_id = session.next_id.wrapping_add(1);
+        if session.next_id == 0 {
+            continue;
+        }
+        if !session.streams.contains_key(&session.next_id) {
+            return Some(session.next_id);
+        }
+    }
+    None
+}
+
+fn drop_stream(shared: &Shared, id: u32) {
+    let mut g = shared.session.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(session) = g.as_mut() {
+        session.streams.remove(&id);
+    }
+}
+
+async fn copy_proxy_stream(
+    mut chromium: TcpStream,
+    mut from_client: mpsc::Receiver<Vec<u8>>,
+    outgoing: mpsc::Sender<WsOut>,
+    id: u32,
+    initial: Vec<u8>,
+) {
+    if !initial.is_empty()
+        && outgoing
+            .send(WsOut::Data {
+                id,
+                payload: initial,
+            })
+            .await
+            .is_err()
+    {
+        return;
+    }
+    let mut buf = vec![0u8; CHUNK];
+    loop {
+        tokio::select! {
+            n = chromium.read(&mut buf) => {
+                match n {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if outgoing
+                            .send(WsOut::Data {
+                                id,
+                                payload: buf[..n].to_vec(),
+                            })
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+            msg = from_client.recv() => {
+                match msg {
+                    Some(data) => {
+                        if chromium.write_all(&data).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+    let _ = outgoing
+        .send(WsOut::Control(ControlMsg::close(id, Some("eof"))))
+        .await;
+}
+
+async fn write_http(
+    stream: &mut TcpStream,
+    status: u16,
+    reason: &str,
+    body: &str,
+) -> std::io::Result<()> {
+    let header = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(header.as_bytes()).await?;
+    stream.write_all(body.as_bytes()).await?;
+    Ok(())
+}

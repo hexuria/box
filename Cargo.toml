@@ -7,6 +7,7 @@ members = [
     "crates/box-desktop",
     "crates/box-chrome",
     "crates/box-cua",
+    "crates/box-egress-tunnel",
     "crates/grok-box",
 ]
 
@@ -24,6 +25,8 @@ box-common = { path = "crates/box-common" }
 box-desktop = { path = "crates/box-desktop" }
 box-chrome = { path = "crates/box-chrome" }
 box-cua = { path = "crates/box-cua" }
+box-egress-tunnel = { path = "crates/box-egress-tunnel" }
+tokio-tungstenite = { version = "0.26", features = ["connect", "rustls-tls-webpki-roots"] }
 axum = { version = "0.8", features = ["json", "macros"] }
 base64 = "0.22"
 tokio = { version = "1.43", features = ["full"] }

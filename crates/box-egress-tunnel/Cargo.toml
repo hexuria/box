@@ -1,0 +1,23 @@
+[package]
+name = "box-egress-tunnel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Guest egress tunnel: WS mux + HTTP CONNECT proxy so Chromium can exit via the operator's machine"
+rust-version.workspace = true
+
+[dependencies]
+box-common = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+futures-util = { workspace = true }
+tokio-tungstenite = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

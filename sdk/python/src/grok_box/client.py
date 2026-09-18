@@ -158,6 +158,9 @@ class GrokBox:
     def chrome(self) -> Any:
         return self._auth("GET", f"{self.host_url}/v1/chrome")
 
+    def egress(self) -> Any:
+        return self._auth("GET", f"{self.host_url}/v1/egress")
+
     def windows(self) -> Any:
         return self._auth("GET", f"{self.host_url}/v1/desktop/windows")
 

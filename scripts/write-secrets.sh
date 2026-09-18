@@ -41,4 +41,9 @@ write_secret() {
 write_secret "${ROOT}/secrets/box_token" "${BOX_TOKEN}"
 write_secret "${ROOT}/secrets/box_vnc_password" "${BOX_VNC_PASSWORD}"
 
-echo "wrote secrets/box_token and secrets/box_vnc_password (values not printed)"
+if [[ -n "${BOX_EGRESS_TUNNEL_BEARER:-}" ]]; then
+  write_secret "${ROOT}/secrets/box_egress_tunnel_bearer" "${BOX_EGRESS_TUNNEL_BEARER}"
+  echo "wrote secrets/box_token, secrets/box_vnc_password, secrets/box_egress_tunnel_bearer (values not printed)"
+else
+  echo "wrote secrets/box_token and secrets/box_vnc_password (values not printed)"
+fi

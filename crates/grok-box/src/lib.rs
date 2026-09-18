@@ -214,6 +214,11 @@ impl GrokBox {
             .await
     }
 
+    pub async fn egress(&self) -> Result<Value, Error> {
+        self.send_json("GET", &format!("{}/v1/egress", self.host_url), None, true)
+            .await
+    }
+
     pub async fn windows(&self) -> Result<Value, Error> {
         self.send_json(
             "GET",

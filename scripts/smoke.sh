@@ -174,7 +174,7 @@ if command -v python3 >/dev/null 2>&1; then
   printf '%s' "${info}" | python3 -c '
 import json, sys
 c = json.load(sys.stdin)["capabilities"]
-for name in ("exec", "files", "desktop", "chrome", "cua"):
+for name in ("exec", "files", "desktop", "chrome", "cua", "egress_tunnel"):
     assert "enabled" in c[name] and "ready" in c[name], name
 assert c["exec"]["enabled"] and c["exec"]["ready"]
 print("capabilities objects ok")

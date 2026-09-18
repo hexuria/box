@@ -92,10 +92,15 @@ if command -v python3 >/dev/null 2>&1; then
   printf '%s' "${info}" | python3 -c '
 import json, sys
 c = json.load(sys.stdin)["capabilities"]
-for name in ("exec", "files", "desktop", "chrome", "cua"):
+for name in ("exec", "files", "desktop", "chrome", "cua", "egress_tunnel"):
     assert "enabled" in c[name] and "ready" in c[name], name
 '
 fi
+
+egress="$(curl -fsS -H "Authorization: Bearer ${TOKEN}" http://127.0.0.1:1340/v1/egress)"
+echo "${egress}"
+echo "${egress}" | grep -q '"enabled":false'
+echo "${egress}" | grep -q '"protocol":"box-egress-v1"'
 
 rid="$(curl -sS -D - -o /dev/null -H "x-request-id: native-smoke" http://127.0.0.1:1337/v1/health)"
 echo "${rid}" | grep -qi 'x-request-id: native-smoke'
