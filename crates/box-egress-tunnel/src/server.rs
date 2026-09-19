@@ -510,19 +510,22 @@ async fn handle_proxy(shared: Arc<Shared>, mut stream: TcpStream) -> anyhow::Res
         }
     }
 
-    if req.connect {
-        stream
-            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-            .await?;
+    if let Err(err) = stream
+        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        .await
+    {
+        // The client left between CONNECT and 200. A `?` here skipped the
+        // cleanup below; 256 of those and every later CONNECT got a 503
+        // blaming a missing client while `/v1/egress` still said ready.
+        tracing::debug!(id, error = %err, "client left before 200; releasing the stream");
+        let _ = outgoing
+            .send(WsOut::Control(ControlMsg::close(id, Some("client gone"))))
+            .await;
+        drop_stream(&shared, generation, id);
+        return Ok(());
     }
 
-    tracing::info!(
-        host = %req.host,
-        port = req.port,
-        id,
-        connect = req.connect,
-        "relaying CONNECT"
-    );
+    tracing::info!(host = %req.host, port = req.port, id, "relaying CONNECT");
     let _ = stream.set_nodelay(true);
     copy_proxy_stream(stream, from_client_rx, outgoing, id, req.initial).await;
     drop_stream(&shared, generation, id);
