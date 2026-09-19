@@ -8,7 +8,8 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Notify};
+use tokio::time::MissedTickBehavior;
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tokio_tungstenite::tungstenite::http::{header, HeaderValue, StatusCode};
 use tokio_tungstenite::tungstenite::Message;
@@ -28,7 +29,16 @@ const CHUNK: usize = 32 * 1024;
 enum WsOut {
     Control(ControlMsg),
     Data { id: u32, payload: Vec<u8> },
+    Ping,
 }
+
+/// How often the server pings an idle client, and how many silent intervals
+/// it tolerates before dropping the session. Without this, `attached` only
+/// flipped on a clean FIN or an RST: a laptop that went to sleep stayed
+/// `ready: true` for as long as TCP keepalive took to notice, which is hours.
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+const KEEPALIVE_MISSES: u8 = 2;
+
 
 struct StreamSlot {
     from_client: mpsc::Sender<Vec<u8>>,
@@ -37,6 +47,11 @@ struct StreamSlot {
 
 struct ClientSession {
     generation: u64,
+    /// Fired by a newer attach so this session's reader loop stops. A second
+    /// bearer holder used to overwrite the slot silently while the incumbent
+    /// kept reading, and frames from either connection landed on whichever
+    /// session was current.
+    evict: Arc<Notify>,
     outgoing: mpsc::Sender<WsOut>,
     streams: HashMap<u32, StreamSlot>,
     next_id: u32,
@@ -221,14 +236,27 @@ where
     let (mut sink, mut stream) = ws.split();
     let (out_tx, mut out_rx) = mpsc::channel::<WsOut>(256);
     let generation = shared.generation.fetch_add(1, Ordering::SeqCst) + 1;
+    let evict = Arc::new(Notify::new());
     {
         let mut g = shared.session.lock().unwrap_or_else(|e| e.into_inner());
-        *g = Some(ClientSession {
+        let previous = g.replace(ClientSession {
             generation,
+            evict: evict.clone(),
             outgoing: out_tx.clone(),
             streams: HashMap::new(),
             next_id: 0,
         });
+        if let Some(previous) = previous {
+            // Documented as "a new handshake replaces the previous"; now it
+            // actually does. Loud on purpose: whoever operates this box should
+            // see that a second holder of the bearer attached.
+            tracing::warn!(
+                evicted = previous.generation,
+                by = generation,
+                "egress client replaced by a newer attach"
+            );
+            previous.evict.notify_one();
+        }
         shared.attached.store(true, Ordering::SeqCst);
     }
 
@@ -244,6 +272,7 @@ where
                     Err(_) => continue,
                 },
                 WsOut::Data { id, payload } => Message::Binary(encode_data(id, &payload).into()),
+                WsOut::Ping => Message::Ping(Vec::new().into()),
             };
             if sink.send(frame).await.is_err() {
                 break;
@@ -252,33 +281,83 @@ where
         let _ = sink.send(Message::Close(None)).await;
     });
 
-    while let Some(frame) = stream.next().await {
-        let Ok(frame) = frame else {
-            break;
-        };
-        match frame {
-            Message::Text(text) => {
-                if let Ok(msg) = serde_json::from_str::<ControlMsg>(&text) {
-                    if msg.wire_ok() {
-                        on_control(&shared, msg);
+    let mut keepalive = tokio::time::interval(KEEPALIVE_INTERVAL);
+    keepalive.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    keepalive.tick().await; // the first tick is immediate; consume it
+    let mut silent_ticks: u8 = 0;
+    loop {
+        tokio::select! {
+            frame = stream.next() => {
+                let Some(Ok(frame)) = frame else {
+                    break;
+                };
+                // Any frame at all is proof of life, so a peer that only ever
+                // answers our pings still counts.
+                silent_ticks = 0;
+                match frame {
+                    Message::Text(text) => {
+                        if let Ok(msg) = serde_json::from_str::<ControlMsg>(&text) {
+                            if msg.wire_ok() {
+                                on_control(&shared, generation, msg);
+                            }
+                        }
                     }
+                    Message::Binary(bin) => {
+                        if let Some((id, payload)) = decode_data(&bin) {
+                            let tx = {
+                                let g = shared.session.lock().unwrap_or_else(|e| e.into_inner());
+                                g.as_ref()
+                                    // Only this connection's own session: a frame
+                                    // from an evicted connection must not reach a
+                                    // stream the new client opened under the same id.
+                                    .filter(|s| s.generation == generation)
+                                    .and_then(|s| s.streams.get(&id))
+                                    .map(|slot| slot.from_client.clone())
+                            };
+                            if let Some(tx) = tx {
+                                match tx.try_send(payload.to_vec()) {
+                                    Ok(()) => {}
+                                    Err(mpsc::error::TrySendError::Full(_)) => {
+                                        // Awaiting here parked the whole reader --
+                                        // every other stream and all control frames
+                                        // -- behind one consumer that stopped
+                                        // reading. Close that one stream instead.
+                                        tracing::warn!(id, "stream consumer not keeping up; closing it");
+                                        drop_stream(&shared, generation, id);
+                                        let _ = out_tx
+                                            .send(WsOut::Control(ControlMsg::close(
+                                                id,
+                                                Some("slow consumer"),
+                                            )))
+                                            .await;
+                                    }
+                                    Err(mpsc::error::TrySendError::Closed(_)) => {}
+                                }
+                            }
+                        }
+                    }
+                    Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
+                    Message::Close(_) => break,
                 }
             }
-            Message::Binary(bin) => {
-                if let Some((id, payload)) = decode_data(&bin) {
-                    let tx = {
-                        let g = shared.session.lock().unwrap_or_else(|e| e.into_inner());
-                        g.as_ref()
-                            .and_then(|s| s.streams.get(&id))
-                            .map(|slot| slot.from_client.clone())
-                    };
-                    if let Some(tx) = tx {
-                        let _ = tx.send(payload.to_vec()).await;
-                    }
+            _ = evict.notified() => {
+                tracing::info!(generation, "egress client session evicted");
+                break;
+            }
+            _ = keepalive.tick() => {
+                if silent_ticks >= KEEPALIVE_MISSES {
+                    tracing::warn!(
+                        generation,
+                        silent_for_secs = KEEPALIVE_INTERVAL.as_secs() * u64::from(KEEPALIVE_MISSES),
+                        "egress client silent; dropping session so `ready` tells the truth"
+                    );
+                    break;
+                }
+                silent_ticks += 1;
+                if out_tx.send(WsOut::Ping).await.is_err() {
+                    break;
                 }
             }
-            Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
-            Message::Close(_) => break,
         }
     }
 
@@ -290,12 +369,14 @@ where
     }
 }
 
-fn on_control(shared: &Shared, msg: ControlMsg) {
+fn on_control(shared: &Shared, generation: u64, msg: ControlMsg) {
     let Some(id) = msg.stream_id() else {
         return;
     };
     let mut g = shared.session.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(session) = g.as_mut() else {
+    let Some(session) = g.as_mut().filter(|s| s.generation == generation) else {
+        // Not this connection's session any more: an evicted client could
+        // otherwise `close` or fake-`opened` the new client's streams.
         return;
     };
     match msg {
@@ -344,7 +425,7 @@ async fn handle_proxy(shared: Arc<Shared>, mut stream: TcpStream) -> anyhow::Res
         let mut g = shared.session.lock().unwrap_or_else(|e| e.into_inner());
         match g.as_mut() {
             Some(session) if session.streams.len() < MAX_STREAMS => alloc_id(session).map(|id| {
-                let (from_tx, from_rx) = mpsc::channel(32);
+                let (from_tx, from_rx) = mpsc::channel(256);
                 let (opened_tx, opened_rx) = oneshot::channel();
                 session.streams.insert(
                     id,
@@ -353,12 +434,18 @@ async fn handle_proxy(shared: Arc<Shared>, mut stream: TcpStream) -> anyhow::Res
                         opened: Some(opened_tx),
                     },
                 );
-                (id, from_rx, opened_rx, session.outgoing.clone())
+                (
+                    id,
+                    from_rx,
+                    opened_rx,
+                    session.outgoing.clone(),
+                    session.generation,
+                )
             }),
             _ => None,
         }
     };
-    let Some((id, from_client_rx, opened_rx, outgoing)) = prepared else {
+    let Some((id, from_client_rx, opened_rx, outgoing, generation)) = prepared else {
         let _ = write_http(
             &mut stream,
             503,
@@ -378,7 +465,7 @@ async fn handle_proxy(shared: Arc<Shared>, mut stream: TcpStream) -> anyhow::Res
         .await
         .is_err()
     {
-        drop_stream(&shared, id);
+        drop_stream(&shared, generation, id);
         let _ = write_http(
             &mut stream,
             503,
@@ -393,7 +480,7 @@ async fn handle_proxy(shared: Arc<Shared>, mut stream: TcpStream) -> anyhow::Res
     match opened {
         Ok(Ok(Ok(()))) => {}
         Ok(Ok(Err(message))) => {
-            drop_stream(&shared, id);
+            drop_stream(&shared, generation, id);
             let _ = write_http(&mut stream, 502, "Bad Gateway", &format!("{message}\n")).await;
             return Ok(());
         }
@@ -401,7 +488,7 @@ async fn handle_proxy(shared: Arc<Shared>, mut stream: TcpStream) -> anyhow::Res
             let _ = outgoing
                 .send(WsOut::Control(ControlMsg::close(id, Some("open-timeout"))))
                 .await;
-            drop_stream(&shared, id);
+            drop_stream(&shared, generation, id);
             let _ = write_http(
                 &mut stream,
                 504,
@@ -428,7 +515,7 @@ async fn handle_proxy(shared: Arc<Shared>, mut stream: TcpStream) -> anyhow::Res
     );
     let _ = stream.set_nodelay(true);
     copy_proxy_stream(stream, from_client_rx, outgoing, id, req.initial).await;
-    drop_stream(&shared, id);
+    drop_stream(&shared, generation, id);
     Ok(())
 }
 
@@ -445,9 +532,11 @@ fn alloc_id(session: &mut ClientSession) -> Option<u32> {
     None
 }
 
-fn drop_stream(shared: &Shared, id: u32) {
+fn drop_stream(shared: &Shared, generation: u64, id: u32) {
     let mut g = shared.session.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(session) = g.as_mut() {
+    // Stream ids restart at 1 per session, so without this a straggler from a
+    // dropped client could remove the *new* client's live stream 1.
+    if let Some(session) = g.as_mut().filter(|s| s.generation == generation) {
         session.streams.remove(&id);
     }
 }

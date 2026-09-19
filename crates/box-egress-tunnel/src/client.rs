@@ -9,6 +9,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tokio::time::MissedTickBehavior;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::{header, HeaderValue};
@@ -22,7 +23,13 @@ const CHUNK: usize = 32 * 1024;
 enum WsOut {
     Control(ControlMsg),
     Data { id: u32, payload: Vec<u8> },
+    Ping,
 }
+
+/// Mirror of the server's keepalive, so a laptop whose link died notices and
+/// its `--reconnect` loop can re-attach instead of sitting on a dead socket.
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+const KEEPALIVE_MISSES: u8 = 2;
 
 struct Streams {
     map: Mutex<HashMap<u32, mpsc::Sender<Vec<u8>>>>,
@@ -121,6 +128,7 @@ pub async fn run_once(cfg: &TunnelClientConfig) -> anyhow::Result<()> {
                     Err(_) => continue,
                 },
                 WsOut::Data { id, payload } => Message::Binary(encode_data(id, &payload).into()),
+                WsOut::Ping => Message::Ping(Vec::new().into()),
             };
             if sink.send(frame).await.is_err() {
                 break;
@@ -129,8 +137,39 @@ pub async fn run_once(cfg: &TunnelClientConfig) -> anyhow::Result<()> {
         let _ = sink.send(Message::Close(None)).await;
     });
 
-    while let Some(frame) = stream.next().await {
-        let frame = frame.context("websocket read")?;
+    let mut keepalive = tokio::time::interval(KEEPALIVE_INTERVAL);
+    keepalive.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    keepalive.tick().await;
+    let mut silent_ticks: u8 = 0;
+    // Every exit goes through the cleanup after the loop, so the writer task is
+    // always aborted; a `?` here used to return early and leak it.
+    let mut outcome: anyhow::Result<()> = Ok(());
+    loop {
+        let frame = tokio::select! {
+            frame = stream.next() => match frame {
+                Some(Ok(frame)) => frame,
+                Some(Err(err)) => {
+                    outcome = Err(anyhow::Error::new(err).context("websocket read"));
+                    break;
+                }
+                None => break,
+            },
+            _ = keepalive.tick() => {
+                if silent_ticks >= KEEPALIVE_MISSES {
+                    outcome = Err(anyhow!(
+                        "egress server silent for {}s",
+                        KEEPALIVE_INTERVAL.as_secs() * u64::from(KEEPALIVE_MISSES)
+                    ));
+                    break;
+                }
+                silent_ticks += 1;
+                if out_tx.send(WsOut::Ping).await.is_err() {
+                    break;
+                }
+                continue;
+            }
+        };
+        silent_ticks = 0;
         match frame {
             Message::Text(text) => {
                 let Ok(msg) = serde_json::from_str::<ControlMsg>(&text) else {
@@ -168,7 +207,7 @@ pub async fn run_once(cfg: &TunnelClientConfig) -> anyhow::Result<()> {
     }
 
     writer.abort();
-    Ok(())
+    outcome
 }
 
 async fn handle_open(
