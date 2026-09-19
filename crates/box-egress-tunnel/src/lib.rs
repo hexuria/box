@@ -16,6 +16,7 @@
 pub mod allowlist;
 pub mod client;
 pub mod config;
+pub mod destination;
 pub mod http1;
 pub mod protocol;
 pub mod server;

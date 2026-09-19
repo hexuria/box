@@ -1,8 +1,11 @@
 //! Optional CONNECT / relay host allowlist (`BOX_EGRESS_RELAY_HOSTS`).
 
-/// Hostname patterns. An empty list means **allow all** (the operator opted
-/// in by attaching the client). Matching is on the CONNECT host string, not
-/// the resolved address.
+/// Hostname patterns. An empty list places no *name* restriction -- but it no
+/// longer means "dial anything": every destination is additionally judged on its
+/// resolved address by [`crate::destination::DestinationPolicy`], which refuses
+/// loopback, private, link-local and other non-public addresses unless someone
+/// explicitly opts in. Matching here is on the CONNECT host string, which the
+/// guest chooses, so treat it as a convenience filter and not as the boundary.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Allowlist {
     patterns: Vec<Pattern>,

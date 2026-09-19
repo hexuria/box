@@ -123,6 +123,7 @@ async fn run() -> Result<()> {
                 bearer,
                 allowlist,
                 reconnect,
+                destination: box_egress_tunnel::destination::DestinationPolicy::from_env(),
             };
             box_egress_tunnel::client::run(cfg)
                 .await

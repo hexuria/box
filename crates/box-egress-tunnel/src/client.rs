@@ -107,6 +107,7 @@ pub async fn run_once(cfg: &TunnelClientConfig) -> anyhow::Result<()> {
     let (mut sink, mut stream) = ws.split();
     let (out_tx, mut out_rx) = mpsc::channel::<WsOut>(256);
     let streams = Arc::new(Streams::new());
+    let policy = cfg.destination.clone();
 
     let _ = out_tx
         .send(WsOut::Control(ControlMsg::hello("client")))
@@ -141,10 +142,11 @@ pub async fn run_once(cfg: &TunnelClientConfig) -> anyhow::Result<()> {
                 match msg {
                     ControlMsg::Open { id, host, port, .. } => {
                         let allow = cfg.allowlist.clone();
+                        let policy = policy.clone();
                         let outgoing = out_tx.clone();
                         let streams = streams.clone();
                         tokio::spawn(async move {
-                            handle_open(id, host, port, allow, outgoing, streams).await;
+                            handle_open(id, host, port, allow, policy, outgoing, streams).await;
                         });
                     }
                     ControlMsg::Close { id, .. } | ControlMsg::Error { id, .. } => {
@@ -174,6 +176,7 @@ async fn handle_open(
     host: String,
     port: u16,
     allow: crate::Allowlist,
+    policy: crate::destination::DestinationPolicy,
     outgoing: mpsc::Sender<WsOut>,
     streams: Arc<Streams>,
 ) {
@@ -184,7 +187,48 @@ async fn handle_open(
         return;
     }
     let dest = format!("{host}:{port}");
-    match TcpStream::connect((host.as_str(), port)).await {
+
+    // Resolve, then judge what it resolved TO. The host string came from the
+    // guest browser, so it proves nothing: `localhost`, a name with an A record
+    // pointing at 192.168.1.1, and `169.254.169.254` are all just strings.
+    let resolved: Vec<std::net::SocketAddr> =
+        match tokio::net::lookup_host((host.as_str(), port)).await {
+            Ok(addrs) => addrs.collect(),
+            Err(err) => {
+                tracing::warn!(%dest, id, error = %err, "outbound DNS failed");
+                let _ = outgoing
+                    .send(WsOut::Control(ControlMsg::error(id, "resolve failed")))
+                    .await;
+                return;
+            }
+        };
+    let refused_reason = resolved
+        .first()
+        .and_then(|addr| policy.refuse_reason(addr))
+        .unwrap_or("no address");
+    let vetted = policy.vet(resolved);
+    if vetted.is_empty() {
+        // Logged at warn: on the operator's own machine this is the signal
+        // that something in the guest tried to reach their network.
+        tracing::warn!(%dest, id, reason = refused_reason, "refused: not a public destination");
+        let _ = outgoing
+            .send(WsOut::Control(ControlMsg::error(id, "destination refused")))
+            .await;
+        return;
+    }
+    // Dial the addresses that were vetted, in order, and NOT the hostname
+    // again -- resolving a second time is what lets a DNS rebind swap in the
+    // address just refused. Trying each keeps the multi-record fallback that
+    // `connect((host, port))` used to give for free.
+    let mut dial: Result<TcpStream, std::io::Error> =
+        Err(std::io::Error::other("no vetted address"));
+    for addr in vetted {
+        dial = TcpStream::connect(addr).await;
+        if dial.is_ok() {
+            break;
+        }
+    }
+    match dial {
         Ok(stream) => {
             let _ = stream.set_nodelay(true);
             let (from_tx, from_rx) = mpsc::channel(32);

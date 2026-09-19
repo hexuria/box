@@ -9,6 +9,7 @@ use box_common::{
 };
 
 use crate::allowlist::Allowlist;
+use crate::destination::DestinationPolicy;
 
 const DEFAULT_WS: &str = "127.0.0.1:8790";
 const DEFAULT_PROXY: &str = "127.0.0.1:8791";
@@ -28,6 +29,8 @@ pub struct TunnelClientConfig {
     pub url: String,
     pub bearer: String,
     pub allowlist: Allowlist,
+    /// Resolved-address and port policy applied immediately before each dial.
+    pub destination: DestinationPolicy,
     pub reconnect: bool,
 }
 
@@ -92,6 +95,7 @@ impl TunnelClientConfig {
             url,
             bearer,
             allowlist,
+            destination: DestinationPolicy::from_env(),
             reconnect,
         })
     }

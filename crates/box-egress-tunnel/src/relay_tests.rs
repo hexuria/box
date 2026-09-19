@@ -6,10 +6,20 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::config::TunnelServerConfig;
+use crate::destination::DestinationPolicy;
 use crate::status::{probe_egress, EgressConfig};
 use crate::{client, server, Allowlist, TunnelClientConfig};
 
 const BEARER: &str = "local-smoke-egress-token";
+
+/// These tests relay to a loopback echo server, which the shipped policy
+/// refuses on purpose. Opting in here keeps the tests about the relay and
+/// keeps the default honest.
+fn loopback_destination() -> DestinationPolicy {
+    DestinationPolicy::default()
+        .with_allow_private(true)
+        .with_ports(Some(Vec::new()))
+}
 
 struct Kill(tokio::task::JoinHandle<()>);
 
@@ -152,6 +162,7 @@ async fn connect_roundtrip_via_client() {
         url: format!("ws://{ws}"),
         bearer: BEARER.to_string(),
         allowlist: Allowlist::any(),
+        destination: loopback_destination(),
         reconnect: false,
     };
     let client = Kill(tokio::spawn(async move {
@@ -180,6 +191,7 @@ async fn ws_rejects_wrong_bearer() {
         url: format!("ws://{ws}"),
         bearer: "totally-wrong-token".to_string(),
         allowlist: Allowlist::any(),
+        destination: loopback_destination(),
         reconnect: false,
     };
     let err = client::run_once(&client_cfg)
@@ -216,6 +228,7 @@ async fn allowlist_rejects_host() {
         url: format!("ws://{ws}"),
         bearer: BEARER.to_string(),
         allowlist: Allowlist::any(),
+        destination: loopback_destination(),
         reconnect: false,
     };
     let _client = Kill(tokio::spawn(async move {
