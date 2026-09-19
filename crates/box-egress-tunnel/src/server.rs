@@ -415,6 +415,16 @@ async fn handle_proxy(shared: Arc<Shared>, mut stream: TcpStream) -> anyhow::Res
         return Ok(());
     };
 
+    if !req.connect {
+        // CONNECT only. Absolute-form proxying read one request head, opened one
+        // upstream, then relayed every later byte on the client socket to that
+        // first upstream -- and Chromium keys plain-http proxy sockets on the
+        // proxy, not the origin, so a second site's request went to the first
+        // site, cookies and all. Encrypted traffic never used this path.
+        let _ = write_http(&mut stream, 405, "Method Not Allowed", "CONNECT only\n").await;
+        return Ok(());
+    }
+
     if !shared.cfg.allowlist.allows(&req.host) {
         tracing::info!(host = %req.host, port = req.port, "CONNECT host not in allowlist");
         let _ = write_http(&mut stream, 403, "Forbidden", "host not allowed\n").await;

@@ -149,6 +149,42 @@ async fn connect_fail_closed_without_client() {
     assert!(!st.client_attached);
 }
 
+/// A raw HTTP request to the proxy, returning the status line's code.
+async fn raw_status(proxy: std::net::SocketAddr, request: &[u8]) -> u16 {
+    let mut s = TcpStream::connect(proxy).await.expect("proxy connect");
+    s.write_all(request).await.expect("write");
+    let mut buf = vec![0u8; 512];
+    let n = s.read(&mut buf).await.expect("read");
+    let head = String::from_utf8_lossy(&buf[..n]);
+    head.split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .expect("status code")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plain_http_is_refused_even_with_a_client_attached() {
+    let (_kill, ws, proxy, admin) = start_tunnel().await;
+    wait_admin(admin, false).await;
+    let client_cfg = TunnelClientConfig {
+        url: format!("ws://{ws}"),
+        bearer: BEARER.to_string(),
+        allowlist: Allowlist::any(),
+        destination: loopback_destination(),
+        reconnect: false,
+    };
+    let _client = Kill(tokio::spawn(async move {
+        let _ = client::run(client_cfg).await;
+    }));
+    wait_admin(admin, true).await;
+    let status = raw_status(
+        proxy,
+        b"GET http://example.com/private HTTP/1.1\r\nHost: example.com\r\n\r\n",
+    )
+    .await;
+    assert_eq!(status, 405, "absolute-form HTTP must not be relayed");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn connect_roundtrip_via_client() {
     let echo_l = TcpListener::bind("127.0.0.1:0").await.unwrap();
