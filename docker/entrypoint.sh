@@ -236,6 +236,10 @@ start_chrome() {
     proxy_args+=(
       --proxy-server="http://127.0.0.1:${BOX_EGRESS_PROXY_PORT}"
       --proxy-bypass-list="localhost;127.0.0.1;[::1];<-loopback>"
+      # WebRTC ignores HTTP proxies: without this a page's STUN candidate
+      # carries the VM's real address next to the laptop's, which is a worse
+      # tell than either alone.
+      --force-webrtc-ip-handling-policy=disable_non_proxied_udp
     )
   fi
   (
@@ -309,6 +313,10 @@ start_egress() {
     echo "box-egress-tunnel did not become ready (see /tmp/box-egress-tunnel.log)" >&2
     exit 1
   fi
+  # Recorded for the dock's launcher: a Chromium started from a shell that did
+  # not inherit BOX_EGRESS_TUNNEL (desktop icon, docker exec) used to come up
+  # with no proxy at all and browse straight out of the VM.
+  printf '%s\n' "${BOX_EGRESS_PROXY_PORT}" > /tmp/box-egress-proxy.port
 }
 
 echo "grok-box starting box_id=${BOX_ID:-grok-box} workspace=${WORKSPACE_ROOT} desktop=${BOX_DESKTOP} chrome=${BOX_CHROME} cua=${BOX_CUA} egress=${BOX_EGRESS_TUNNEL}"
