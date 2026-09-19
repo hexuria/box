@@ -8,12 +8,13 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, oneshot, Notify};
+use tokio::sync::{mpsc, oneshot, Notify, Semaphore};
 use tokio::time::MissedTickBehavior;
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tokio_tungstenite::tungstenite::http::{header, HeaderValue, StatusCode};
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{accept_hdr_async, WebSocketStream};
+use tokio_tungstenite::{accept_hdr_async_with_config, WebSocketStream};
 
 use box_common::{parse_bearer, tokens_equal};
 
@@ -39,6 +40,40 @@ enum WsOut {
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const KEEPALIVE_MISSES: u8 = 2;
 
+/// A peer that opens a socket and never sends the upgrade used to pin a task
+/// and a file descriptor forever, with no bearer needed — auth happens after
+/// accept. Bound both the wait and how many may wait at once.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_PENDING_HANDSHAKES: usize = 64;
+
+/// Frame and message caps for both directions. The defaults (16 MiB per frame,
+/// 64 MiB per message) are sized for a server with headroom, not a 4 GB guest
+/// relaying byte streams that are chunked at the TCP layer anyway.
+fn ws_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .max_message_size(Some(1 << 20))
+        .max_frame_size(Some(256 << 10))
+}
+
+/// One accept failure must not end the listener: `ECONNABORTED` is routine, and
+/// `EMFILE` under a flood of idle sockets used to `?` out of the loop, exit the
+/// process, and take the whole container down with it via the entrypoint's
+/// death-watch. Log, back off briefly on resource exhaustion, carry on.
+async fn accept_or_skip<T>(listener: &'static str, accepted: std::io::Result<T>) -> Option<T> {
+    match accepted {
+        Ok(v) => Some(v),
+        Err(err) => {
+            tracing::warn!(listener, error = %err, "accept failed; continuing");
+            if matches!(
+                err.raw_os_error(),
+                Some(libc_emfile) if libc_emfile == 24 || libc_emfile == 23
+            ) {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            None
+        }
+    }
+}
 
 struct StreamSlot {
     from_client: mpsc::Sender<Vec<u8>>,
@@ -59,6 +94,7 @@ struct ClientSession {
 
 struct Shared {
     cfg: TunnelServerConfig,
+    handshakes: Semaphore,
     attached: AtomicBool,
     generation: AtomicU64,
     session: Mutex<Option<ClientSession>>,
@@ -113,6 +149,7 @@ pub async fn run_with_binds(cfg: TunnelServerConfig, binds: ServerBinds) -> anyh
     );
     let shared = Arc::new(Shared {
         cfg,
+        handshakes: Semaphore::new(MAX_PENDING_HANDSHAKES),
         attached: AtomicBool::new(false),
         generation: AtomicU64::new(0),
         session: Mutex::new(None),
@@ -123,7 +160,7 @@ pub async fn run_with_binds(cfg: TunnelServerConfig, binds: ServerBinds) -> anyh
     loop {
         tokio::select! {
             accepted = binds.ws.accept() => {
-                let (stream, peer) = accepted?;
+                let Some((stream, peer)) = accept_or_skip("ws", accepted).await else { continue };
                 let shared = shared.clone();
                 tokio::spawn(async move {
                     if let Err(err) = handle_ws(shared, stream, peer).await {
@@ -132,7 +169,7 @@ pub async fn run_with_binds(cfg: TunnelServerConfig, binds: ServerBinds) -> anyh
                 });
             }
             accepted = binds.proxy.accept() => {
-                let (stream, peer) = accepted?;
+                let Some((stream, peer)) = accept_or_skip("proxy", accepted).await else { continue };
                 let shared = shared.clone();
                 tokio::spawn(async move {
                     if let Err(err) = handle_proxy(shared, stream).await {
@@ -141,7 +178,7 @@ pub async fn run_with_binds(cfg: TunnelServerConfig, binds: ServerBinds) -> anyh
                 });
             }
             accepted = binds.admin.accept() => {
-                let (stream, _) = accepted?;
+                let Some((stream, _)) = accept_or_skip("admin", accepted).await else { continue };
                 let shared = shared.clone();
                 tokio::spawn(async move {
                     let _ = handle_admin(shared, stream).await;
@@ -184,25 +221,38 @@ async fn handle_ws(
     peer: std::net::SocketAddr,
 ) -> anyhow::Result<()> {
     let bearer = shared.cfg.bearer.clone();
-    let ws = accept_hdr_async(stream, |req: &Request, mut response: Response| {
-        if !authorized(req, &bearer) {
-            let mut resp = ErrorResponse::new(Some("unauthorized\n".to_string()));
-            *resp.status_mut() = StatusCode::UNAUTHORIZED;
-            return Err(resp);
-        }
-        if let Some(val) = req.headers().get("sec-websocket-protocol") {
-            if let Ok(s) = val.to_str() {
-                if s.split(',').any(|p| p.trim() == PROTOCOL_NAME) {
-                    response.headers_mut().insert(
-                        header::SEC_WEBSOCKET_PROTOCOL,
-                        HeaderValue::from_static(PROTOCOL_NAME),
-                    );
+    let Ok(permit) = shared.handshakes.try_acquire() else {
+        tracing::warn!(%peer, "too many pending handshakes; dropping the connection");
+        return Ok(());
+    };
+    let handshake = accept_hdr_async_with_config(
+        stream,
+        |req: &Request, mut response: Response| {
+            if !authorized(req, &bearer) {
+                let mut resp = ErrorResponse::new(Some("unauthorized\n".to_string()));
+                *resp.status_mut() = StatusCode::UNAUTHORIZED;
+                return Err(resp);
+            }
+            if let Some(val) = req.headers().get("sec-websocket-protocol") {
+                if let Ok(s) = val.to_str() {
+                    if s.split(',').any(|p| p.trim() == PROTOCOL_NAME) {
+                        response.headers_mut().insert(
+                            header::SEC_WEBSOCKET_PROTOCOL,
+                            HeaderValue::from_static(PROTOCOL_NAME),
+                        );
+                    }
                 }
             }
-        }
-        Ok(response)
-    })
-    .await?;
+            Ok(response)
+        },
+        Some(ws_config()),
+    );
+    let ws = tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake)
+        .await
+        .map_err(|_| anyhow::anyhow!("handshake timed out"))??;
+    // The permit covers the handshake only; a session is bounded separately
+    // (one at a time, by eviction).
+    drop(permit);
 
     tracing::info!(%peer, "egress client attached");
     serve_client(shared, ws).await;

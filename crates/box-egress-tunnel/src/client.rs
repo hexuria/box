@@ -10,9 +10,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
-use tokio_tungstenite::connect_async;
+use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::{header, HeaderValue};
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::config::TunnelClientConfig;
@@ -108,7 +109,10 @@ pub async fn run_once(cfg: &TunnelClientConfig) -> anyhow::Result<()> {
     );
 
     tracing::info!(url = %cfg.url, protocol = PROTOCOL_NAME, "connecting egress client");
-    let (ws, _resp) = connect_async(request)
+    let ws_config = WebSocketConfig::default()
+        .max_message_size(Some(1 << 20))
+        .max_frame_size(Some(256 << 10));
+    let (ws, _resp) = connect_async_with_config(request, Some(ws_config), false)
         .await
         .with_context(|| format!("connect {}", cfg.url))?;
     let (mut sink, mut stream) = ws.split();
