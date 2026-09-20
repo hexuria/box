@@ -997,6 +997,8 @@ mod tests {
         assert!(is_secret_key("BOX_VNC_PASSWORD"));
         assert!(is_secret_key("BOX_TOKEN_FILE"));
         assert!(is_secret_key("box_vnc_password_file"));
+        assert!(is_secret_key("BOX_EGRESS_TUNNEL_BEARER"));
+        assert!(is_secret_key("BOX_EGRESS_TUNNEL_BEARER_FILE"));
         assert!(!is_secret_key("PATH"));
         assert!(!is_secret_key("TERM"));
     }

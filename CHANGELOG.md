@@ -2,6 +2,16 @@
 
 Guest honesty and wire parity against BOX-REVIEW P0 → P1 (selective P2). Baseline `main` @ `3c67b576e2d4b67da5849b55bc2de6231d31ff47`.
 
+## Egress tunnel (laptop CONNECT for prod Chromium)
+
+| Item | Where |
+| --- | --- |
+| `box-egress-tunnel` crate: WS mux + HTTP CONNECT, fail-closed without client, local echo tests | `crates/box-egress-tunnel` |
+| Guest starts the server before Chromium when `BOX_EGRESS_TUNNEL=1`; Chromium `--proxy-server` + bypass list | `docker/entrypoint.sh`, `docker/box-chromium`, `docker/Dockerfile` |
+| Compose loopback publish **8790** only (never 8791/8792) | `docker-compose.yml` |
+| `/v1/info` `capabilities.egress_tunnel: {enabled, ready}`; `GET /v1/egress` | `crates/box-host`, OpenAPI, CLI/SDKs |
+| Docs: prod without host-network, OpenGrok client flags, capability JSON | `docs/EGRESS.md`, README, DEPLOY, ARCHITECTURE |
+
 ## P0
 
 | Item | Where |

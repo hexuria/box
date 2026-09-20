@@ -41,7 +41,7 @@ CORS is not permissive. Server-to-server callers are unaffected. Browsers only g
 
 1. Jail-check `cwd` under `WORKSPACE_ROOT`.
 2. Spawn argv or `/bin/sh -c`.
-3. Strip `BOX_TOKEN`, `BOX_HOST_TOKEN`, and `BOX_VNC_PASSWORD` from the child (including caller-supplied `env`). The daemons also drop those names from their own environ after config load.
+3. Strip `BOX_TOKEN`, `BOX_HOST_TOKEN`, `BOX_VNC_PASSWORD`, and `BOX_EGRESS_TUNNEL_BEARER` from the child (including caller-supplied `env`). The daemons also drop those names from their own environ after config load.
 4. Write `stdin` if provided, then close the pipe so the child sees EOF.
 5. Cap stdout/stderr (`BOX_MAX_OUTPUT_BYTES`).
 6. On timeout: **SIGTERM** the process group, wait `BOX_EXEC_KILL_GRACE_MS` (default 2s), then **SIGKILL**. Keep captured output. `timed_out: true`. Response includes `exec_id`.
@@ -104,9 +104,9 @@ Default `screenshot` is `end` (one PNG on the receipt, and a file when `artifact
 
 ## Host inventory
 
-`GET /v1/info` (bearer) returns box id, capability flags, workspace path, and **container-local** endpoint URLs (`scope: container-local`). Use it to see whether desktop/chrome/CUA are up. Do not dial those URLs from another machine; dial the URLs you published.
+`GET /v1/info` (bearer) returns box id, capability flags, workspace path, and **container-local** endpoint URLs (`scope: container-local`). Use it to see whether desktop/chrome/CUA/egress_tunnel are up. Do not dial those URLs from another machine; dial the URLs you published.
 
-`GET /v1/desktop` and `GET /v1/chrome` are the same: status inside the guest. Viewer and CDP addresses are loopback unless you published noVNC (6080) yourself.
+`GET /v1/desktop`, `GET /v1/chrome`, and `GET /v1/egress` are the same: status inside the guest. Viewer and CDP addresses are loopback unless you published noVNC (6080) yourself. Egress `ws` is the guest listen; the laptop dials the URL **you** published or SSH-forwarded.
 
 ## Demo proxy (EnsureBox)
 

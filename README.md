@@ -12,7 +12,8 @@ License: **MIT**. MSRV: Rust **1.85**.
 | --- | --- |
 | Guest image `grok-box` | Linux box: shell, files, 1280×800 X desktop, Chromium, Computer Use |
 | `box-exec` `:1337` | Exec, files (GET/PUT/DELETE/mkdir), CUA |
-| `box-host` `:1340` | Health, ready, identity, desktop/chrome status |
+| `box-host` `:1340` | Health, ready, identity, desktop/chrome/egress status |
+| CLI `grok-box` | Same surface as the SDKs |
 | CLI `grok-box` | Same surface as the SDKs |
 | SDKs | Connect with `(execUrl, hostUrl, token)` — no `docker run` helper |
 | [`ensurebox/`](ensurebox/) | **Frozen demo / non-product** — sample orchestrator / operator UI (not a supported control plane) |
@@ -104,7 +105,7 @@ Native mode sets `BOX_DESKTOP=0`. CUA screenshot needs the container (or a local
 
 ## How an orchestrator should plug in
 
-1. Start a container from this image. Inject `BOX_TOKEN`, `BOX_VNC_PASSWORD`, and `BOX_ID`. Publish **1337 / 1340 / 6080** on loopback (or behind a tunnel). Do **not** publish 5900 or 9222.
+1. Start a container from this image. Inject `BOX_TOKEN`, `BOX_VNC_PASSWORD`, and `BOX_ID`. Publish **1337 / 1340 / 6080** on loopback (or behind a tunnel). Do **not** publish 5900 or 9222. Optional laptop egress: [EGRESS.md](docs/EGRESS.md) (`BOX_EGRESS_TUNNEL=1`, publish **8790** only, never 8791).
 2. Wait until `GET <hostUrl>/v1/ready` returns 200 **with Bearer**.
 3. Call `connect(execUrl, hostUrl, token)` in the CLI or an SDK. Do not parse `/v1/info.endpoints` as the public URLs.
 4. Drive `POST /v1/exec`, files, `/v1/cua/*`, and `POST /v1/cua/recipe` yourself.
@@ -125,8 +126,11 @@ cd l1 && cp .env.example .env && npm install && npm run dev          # human wor
 | Port | Published? | Process | Notes |
 | --- | --- | --- | --- |
 | **1337** | host `127.0.0.1` | `box-exec` | exec, files, CUA. Process bind inside the image is `0.0.0.0`. |
-| **1340** | host `127.0.0.1` | `box-host` | health, ready, info, desktop, chrome. |
+| **1340** | host `127.0.0.1` | `box-host` | health, ready, info, desktop, chrome, egress. |
 | **6080** | host `127.0.0.1` | websockify / noVNC | Viewer. **Not** Bearer-authenticated. |
+| **8790** | host `127.0.0.1` | `box-egress-tunnel` WS | Laptop client. Off unless `BOX_EGRESS_TUNNEL=1`. See [EGRESS.md](docs/EGRESS.md). |
+| 8791 | **no** | CONNECT proxy | Chromium only, `127.0.0.1` inside the image. Never publish. |
+| 8792 | **no** | tunnel admin | Status for box-host. Loopback. Never publish. |
 | 5900 | **no** | x11vnc | `BOX_VNC_BIND=127.0.0.1:5900` inside the image |
 | 9222 | **no** | Chromium CDP | `127.0.0.1` only (`BOX_CDP_PORT`). Do not publish. |
 
@@ -159,6 +163,14 @@ Compose also sets `cap_drop: [ALL]`, `security_opt: [no-new-privileges:true]`, `
 | `BOX_CHROME_PROFILE` | `/home/box/chrome-profile` | Persistent profile (compose volume) |
 | `BOX_CDP_PORT` | `9222` | CDP on `127.0.0.1` only |
 | `BOX_CUA` | `1` | Enable `/v1/cua/*` |
+| `BOX_EGRESS_TUNNEL` | `0` | `1` starts `box-egress-tunnel` before Chromium and sets `--proxy-server`. See [EGRESS.md](docs/EGRESS.md). |
+| `BOX_EGRESS_WS_BIND` | `0.0.0.0:8790` in image; `127.0.0.1:8790` native | WebSocket for the laptop client |
+| `BOX_EGRESS_PROXY_BIND` | `127.0.0.1:8791` | HTTP CONNECT for Chromium. Never publish. |
+| `BOX_EGRESS_ADMIN_BIND` | `127.0.0.1:8792` | Loopback status for box-host |
+| `BOX_EGRESS_TUNNEL_BEARER` | required when tunnel on | WS Bearer. Prefer `_FILE`. Independent of `BOX_TOKEN`. |
+| `BOX_EGRESS_TUNNEL_BEARER_FILE` | unset | Preferred file form (same story as `BOX_TOKEN_FILE`) |
+| `BOX_EGRESS_RELAY_HOSTS` | empty = all | Optional CONNECT host allowlist (`*.example.com` ok) |
+| `BOX_MAX_CONCURRENT_EXECS` | `8` | Max simultaneous `POST /v1/exec` (and stream/detach). Extra calls get `429 busy`. |
 | `BOX_MAX_CONCURRENT_EXECS` | `8` | Max simultaneous `POST /v1/exec` (and stream/detach). Extra calls get `429 busy`. |
 | `BOX_MAX_DIR_ENTRIES` | `4096` | Cap on directory listings (`truncated: true` if hit) |
 | `BOX_EXEC_KILL_GRACE_MS` | `2000` | After exec timeout, wait this long after SIGTERM before SIGKILL |
@@ -169,7 +181,7 @@ Send `Authorization: Bearer <token>`. `GET /v1/health` is public and returns onl
 
 ### Delivering the secrets
 
-Pass each secret as a **file**, not as a value: `BOX_TOKEN_FILE`, `BOX_HOST_TOKEN_FILE`, `BOX_VNC_PASSWORD_FILE`. The file form wins when both are set. Compose does this for you — `scripts/write-secrets.sh` writes `./secrets/*` and Compose mounts them read-only at `/run/secrets/`.
+Pass each secret as a **file**, not as a value: `BOX_TOKEN_FILE`, `BOX_HOST_TOKEN_FILE`, `BOX_VNC_PASSWORD_FILE`, `BOX_EGRESS_TUNNEL_BEARER_FILE`. The file form wins when both are set. Compose does this for you — `scripts/write-secrets.sh` writes `./secrets/*` and Compose mounts them read-only at `/run/secrets/`.
 
 A secret handed to the container as an **environment value** is copied into pid 1's environment block at `execve`. `/proc/1/environ` serves that block to every process in the box, for the life of the box, and `docker inspect` shows it on the host. Nothing inside the box can undo that. In particular `wipe_secret_environ()` does **not**: `unsetenv` rewrites the `environ` pointer array but leaves the original block on the stack, and that block is what `/proc` reads. What it does do is keep the value out of `getenv` for the rest of the process, which is worth having but is not the same claim.
 
@@ -192,6 +204,7 @@ crates/box-host      identity / ready / capabilities / desktop + chrome status
 crates/box-desktop   Xvfb probe, 1280×800 geometry, viewer URL
 crates/box-chrome    Chromium profile + localhost CDP probe
 crates/box-cua       screenshot / click / type / key / scroll / double-click / drag / move / recipe
+crates/box-egress-tunnel  guest WS mux + Chromium CONNECT proxy (laptop client is the same binary)
 crates/grok-box      typed client + CLI (workspace only, not published)
 sdk/typescript       TypeScript client (workspace only)
 sdk/python           Python client (workspace only)
@@ -209,6 +222,7 @@ l1/                  demo human UI (EnsureBox only)
 ## Docs
 
 - [Deploy](docs/DEPLOY.md) — test-deploy on **Akamai Cloud** (Linode; not Vultr), then the same pattern on AWS/GCP/Azure. First test is one VM, guest Compose only, private SSH tunnel or Tailscale; CLI/SDK from your laptop. Do not expose 1337/1340/6080 on the public internet.
+- [Egress](docs/EGRESS.md) — laptop CONNECT tunnel for Chromium in prod (no host-network)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Startup](docs/STARTUP.md)
 - [Request processing](docs/PROCESSING.md)
@@ -220,7 +234,7 @@ l1/                  demo human UI (EnsureBox only)
 
 - Not a supported production control plane (EnsureBox is a demo)
 - Not L4 / not an OpenAI-compatible inference gateway
-- Not a re-host of any proprietary exec/sand-host binary
+- Not a re-host of any proprietary exec/sand-host / sand-egress-tunnel binary
 - Not a native Windows or macOS box OS
 - Not a vendored [trycua/cua](https://github.com/trycua/cua) tree — Linux X11 is the CUA backend
 - Not published to crates.io, npm, or PyPI

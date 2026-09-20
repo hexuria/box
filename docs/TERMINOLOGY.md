@@ -25,3 +25,4 @@ Names used in this repository. The public product name, the workspace crate, and
 | **L4** | Inference gateway. Not this repository. Do not implement it here. |
 | **noVNC** | Browser viewer on 6080. Password = `BOX_VNC_PASSWORD` (8 chars). Not Bearer-authenticated. Host publish is loopback. |
 | **CDP** | Chromium DevTools on `127.0.0.1:9222` inside the guest. Never publish. |
+| **egress tunnel** | `box-egress-tunnel`: Chromium CONNECT via a client on the operator laptop. Capability `egress_tunnel`. See [EGRESS.md](EGRESS.md). |

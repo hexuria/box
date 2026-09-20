@@ -385,7 +385,8 @@ Uses `BOX_HOST_TOKEN` if set, else `BOX_TOKEN`.
     "files": { "enabled": true, "ready": true },
     "desktop": { "enabled": true, "ready": true },
     "chrome": { "enabled": true, "ready": true },
-    "cua": { "enabled": true, "ready": true }
+    "cua": { "enabled": true, "ready": true },
+    "egress_tunnel": { "enabled": false, "ready": false }
   },
   "endpoints": {
     "exec": "http://127.0.0.1:1337",
@@ -432,6 +433,21 @@ Connect to `viewer.url` through a tunnel or loopback publish. VNC password is `B
 ```
 
 CDP is loopback-only. `ready` means Chromium answered `GET /json/version` on that port (not a `/proc` scrape). Agents inside the box may attach; do not publish 9222.
+
+### `GET /v1/egress` (bearer)
+
+Laptop CONNECT tunnel. `ready` / `client_attached` mean a `box-egress-tunnel client` is attached right now. When enabled but not ready, Chromium CONNECT fail-closes (`503`). `ws` / `proxy` are container-local listen addresses — not the URL to dial. See [EGRESS.md](EGRESS.md).
+
+```json
+{
+  "enabled": true,
+  "ready": false,
+  "client_attached": false,
+  "protocol": "box-egress-v1",
+  "ws": "127.0.0.1:8790",
+  "proxy": "127.0.0.1:8791"
+}
+```
 
 ### `GET /v1/desktop/windows` (bearer)
 

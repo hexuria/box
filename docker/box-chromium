@@ -3,6 +3,32 @@
 # (BOX_CHROME=1), so this opens a window in that instance; with no instance
 # running it starts one. uid 1000 has no setuid sandbox in this image, hence
 # --no-sandbox, and --test-type hides the banner about it.
+#
+# When BOX_EGRESS_TUNNEL is on, pass the same CONNECT proxy flags as the
+# entrypoint so a cold start (no running instance) still exits via the laptop.
+proxy_server=""
+proxy_bypass=""
+proxy_webrtc=""
+# The entrypoint records the proxy port when it starts the tunnel, so a launch
+# from a shell that did not inherit BOX_EGRESS_TUNNEL still goes through the
+# proxy rather than quietly out of the VM.
+port_file="/tmp/box-egress-proxy.port"
+tunnel="${BOX_EGRESS_TUNNEL:-}"
+port="${BOX_EGRESS_PROXY_PORT:-}"
+if [ -z "${tunnel}" ] && [ -r "${port_file}" ]; then tunnel=1; fi
+if [ -z "${port}" ] && [ -r "${port_file}" ]; then port="$(cat "${port_file}")"; fi
+case "$(echo "${tunnel:-0}" | tr '[:upper:]' '[:lower:]')" in
+  0|false|off|no) ;;
+  *)
+    if [ -z "${port}" ]; then
+      echo "box-chromium: the egress tunnel is on but its proxy port is unknown; refusing to start unproxied" >&2
+      exit 1
+    fi
+    proxy_server="--proxy-server=http://127.0.0.1:${port}"
+    proxy_bypass="--proxy-bypass-list=localhost;127.0.0.1;[::1];<-loopback>"
+    proxy_webrtc="--force-webrtc-ip-handling-policy=disable_non_proxied_udp"
+    ;;
+esac
 exec chromium \
   --user-data-dir="${BOX_CHROME_PROFILE:-/home/box/chrome-profile}" \
   --no-first-run \
@@ -14,4 +40,7 @@ exec chromium \
   --hide-crash-restore-bubble \
   --disable-session-crashed-bubble \
   --disable-features=Translate \
+  ${proxy_server} \
+  ${proxy_bypass} \
+  ${proxy_webrtc} \
   "$@"
