@@ -276,8 +276,17 @@ start_chrome() {
         about:blank \
         >/tmp/box-chrome.log 2>&1 &
       echo $! > /tmp/box-chrome.pid
-      wait $! || true
-      echo "chromium exited; restarting in 2s" >&2
+      code=0
+      wait $! || code=$?
+      # A browser the person closed stays closed: exit 0 is a deliberate close from the VNC
+      # screen, and a window that reappears two seconds later is not a box anyone can use. The
+      # dock's launcher and `open_url` start it again when it is wanted. Anything else is a
+      # crash, and a crash must not take the box down — restart it.
+      if [[ "${code}" -eq 0 ]]; then
+        echo "chromium closed; not restarting (the dock launcher or open_url starts it again)" >&2
+        break
+      fi
+      echo "chromium exited with ${code}; restarting in 2s" >&2
       sleep 2
     done
   ) &
