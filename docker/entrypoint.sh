@@ -111,6 +111,12 @@ start_desktop() {
     exit 1
   fi
 
+  # A container that was killed keeps the previous Xvfb's lock and socket in its layer, and
+  # the next start reuses the same pid, so Xvfb reads its own stale lock as a live server and
+  # refuses to start ("Server is already active for display 1") — forever, on every restart.
+  # Nothing but this function ever starts an X server here, so at this point both are stale.
+  rm -f "/tmp/.X${dnum}-lock" "/tmp/.X11-unix/X${dnum}"
+
   echo "starting Xvfb ${BOX_DISPLAY} ${xvfb_screen}"
   # XTEST is required for in-process CUA. DAMAGE lets x11vnc push dirty rects.
   Xvfb "${BOX_DISPLAY}" -screen 0 "${xvfb_screen}" -ac +extension GLX +extension XTEST +extension DAMAGE +render -noreset &
@@ -218,6 +224,12 @@ start_chrome() {
   # Closing/crashing the browser must not take the box down — restart it.
   (
     while true; do
+      # The profile is a bind mount, so it keeps Chromium's singleton lock across a kill and even
+      # across a recreate of the container; a hostname/pid the new container happens to reuse
+      # makes Chromium believe another instance owns it. This loop is the only thing that starts
+      # Chromium on this profile, so before each start the lock is stale by definition.
+      rm -f "${BOX_CHROME_PROFILE}/SingletonLock" "${BOX_CHROME_PROFILE}/SingletonSocket" \
+        "${BOX_CHROME_PROFILE}/SingletonCookie"
       "${bin}" \
         --user-data-dir="${BOX_CHROME_PROFILE}" \
         --no-first-run \
