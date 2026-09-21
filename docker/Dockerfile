@@ -65,6 +65,7 @@ COPY docker/chromium-policies.json /etc/opt/chrome/policies/managed/grok-box.jso
 # The dock's Chromium launcher: same profile as the entrypoint's Chromium, so a
 # click opens a window in the running instance instead of a second browser.
 COPY docker/box-chromium /usr/local/bin/box-chromium
+COPY docker/box-chromium-pipe /usr/local/bin/box-chromium-pipe
 # Panel with Terminal / Chromium / Files launchers, so xfce4-panel never shows
 # its first-run wizard and the dock is there from the first frame.
 COPY --chown=box:box docker/xfce/xfce4-panel.xml /home/box/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml
@@ -79,6 +80,7 @@ COPY docker/xfce/wallpaper.png /usr/share/backgrounds/grok-box.png
 RUN chmod 755 /usr/local/bin/entrypoint.sh /usr/local/bin/websockify-nodelay /usr/local/bin/box-exec /usr/local/bin/box-host \
         /usr/local/bin/box-egress-tunnel \
         /usr/local/bin/box-reset-desktop /usr/local/bin/box-release-keys /usr/local/bin/box-chromium \
+        /usr/local/bin/box-chromium-pipe \
     && chown -R box:box /home/box/.config
 
 ENV WORKSPACE_ROOT=/workspace \
