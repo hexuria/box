@@ -8,4 +8,6 @@ What rides on it: the WebAuthn domain, for a saved passkey (a platform-shaped vi
 
 Same profile and proxy rules as `box-chromium`, so a later `box-chromium <url>` (the dock, `open_url`) opens its tab in the piped instance. A browser started any other way has no pipe; the server replaces it (`pkill -x chromium`, then a fresh piped one) and reopens the page.
 
+This only holds with `BOX_CHROME=0`, which is how the server creates its boxes: the entrypoint's own Chromium (`start_chrome`) listens on `--remote-debugging-port` and restarts itself every two seconds, so with it on, the port is open whenever the piped instance is absent and every restart forwards a blank tab into the piped one. A box run by hand for the pipe needs the same setting. The window takes its size from `BOX_DISPLAY_GEOM` like the entrypoint's does.
+
 The wire is one JSON object per message, terminated by a NUL byte. Nothing in the box speaks it; the server does.
