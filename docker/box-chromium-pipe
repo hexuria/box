@@ -52,6 +52,7 @@ exec chromium \
   --hide-crash-restore-bubble \
   --disable-session-crashed-bubble \
   --disable-features=Translate \
+  --load-extension=/opt/box/active-tab \
   --window-size="${win_w},${win_h}" \
   --window-position=0,0 \
   --remote-debugging-pipe \

@@ -40,6 +40,7 @@ exec chromium \
   --hide-crash-restore-bubble \
   --disable-session-crashed-bubble \
   --disable-features=Translate \
+  --load-extension=/opt/box/active-tab \
   ${proxy_server} \
   ${proxy_bypass} \
   ${proxy_webrtc} \

@@ -12,7 +12,7 @@ COPY crates ./crates
 COPY Cargo.lock* ./
 
 RUN cargo build --release -p box-exec -p box-host -p box-egress-tunnel \
-    && strip target/release/box-exec target/release/box-host target/release/box-egress-tunnel
+    && strip target/release/box-exec target/release/box-host target/release/box-egress-tunnel target/release/box-active-tab
 
 FROM debian:bookworm-slim AS runtime
 
@@ -56,6 +56,12 @@ RUN apt-get update \
 COPY --from=builder /src/target/release/box-exec /usr/local/bin/box-exec
 COPY --from=builder /src/target/release/box-host /usr/local/bin/box-host
 COPY --from=builder /src/target/release/box-egress-tunnel /usr/local/bin/box-egress-tunnel
+# The page in front, for the server's check before it types a saved login: an extension with
+# only the `tabs` permission reports it to box-active-tab over native messaging, and
+# box-host serves it at GET /v1/chrome/active-tab. Every Chromium launch loads the extension.
+COPY --from=builder /src/target/release/box-active-tab /usr/local/bin/box-active-tab
+COPY docker/dev.opengrok.active_tab.json /etc/chromium/native-messaging-hosts/dev.opengrok.active_tab.json
+COPY docker/active-tab /opt/box/active-tab
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY docker/websockify-nodelay.py /usr/local/bin/websockify-nodelay
 COPY docker/box-reset-desktop.sh /usr/local/bin/box-reset-desktop
@@ -80,7 +86,7 @@ COPY docker/xfce/wallpaper.png /usr/share/backgrounds/grok-box.png
 RUN chmod 755 /usr/local/bin/entrypoint.sh /usr/local/bin/websockify-nodelay /usr/local/bin/box-exec /usr/local/bin/box-host \
         /usr/local/bin/box-egress-tunnel \
         /usr/local/bin/box-reset-desktop /usr/local/bin/box-release-keys /usr/local/bin/box-chromium \
-        /usr/local/bin/box-chromium-pipe \
+        /usr/local/bin/box-chromium-pipe /usr/local/bin/box-active-tab \
     && chown -R box:box /home/box/.config
 
 ENV WORKSPACE_ROOT=/workspace \

@@ -268,6 +268,7 @@ start_chrome() {
         --hide-crash-restore-bubble \
         --disable-session-crashed-bubble \
         --disable-features=Translate \
+        --load-extension=/opt/box/active-tab \
         --window-size="${w},${h}" \
         --window-position=0,0 \
         --remote-debugging-address=127.0.0.1 \
