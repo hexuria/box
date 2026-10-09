@@ -214,6 +214,18 @@ impl GrokBox {
             .await
     }
 
+    /// `GET /v1/chrome/active-tab`: `{url, atMs?}`, the page in front of the box's Chromium as
+    /// its extension last reported it; `url` is null when nothing has.
+    pub async fn active_tab(&self) -> Result<Value, Error> {
+        self.send_json(
+            "GET",
+            &format!("{}/v1/chrome/active-tab", self.host_url),
+            None,
+            true,
+        )
+        .await
+    }
+
     pub async fn egress(&self) -> Result<Value, Error> {
         self.send_json("GET", &format!("{}/v1/egress", self.host_url), None, true)
             .await

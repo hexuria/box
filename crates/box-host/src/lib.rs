@@ -5,6 +5,8 @@
 //! `box-exec` (and the X display when desktop is required). Heap: same
 //! mimalloc feature as `box-exec`.
 
+pub mod active_tab;
+
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -128,6 +130,7 @@ pub fn app(state: AppState) -> Router {
         .route("/v1/desktop", get(desktop))
         .route("/v1/desktop/windows", get(windows))
         .route("/v1/chrome", get(chrome))
+        .route("/v1/chrome/active-tab", get(active_tab_now))
         .route("/v1/egress", get(egress))
         .route("/v1/busy", get(busy))
         .route("/v1/shutdown", post(shutdown))
@@ -256,6 +259,14 @@ async fn chrome(State(state): State<AppState>) -> Json<ChromeStatus> {
 
 async fn egress(State(state): State<AppState>) -> Json<EgressStatus> {
     Json(probe_egress(&state.egress))
+}
+
+/// The page in front of Chromium, as the box's extension last reported it (`url: null` when
+/// nothing has). Read before a saved login is typed; see [`active_tab`].
+async fn active_tab_now() -> Json<active_tab::ActiveTab> {
+    Json(active_tab::read(std::path::Path::new(
+        active_tab::ACTIVE_TAB_FILE,
+    )))
 }
 
 async fn windows(State(state): State<AppState>) -> Json<WindowList> {
