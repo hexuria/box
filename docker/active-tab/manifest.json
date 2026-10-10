@@ -2,8 +2,24 @@
   "manifest_version": 3,
   "name": "Box active tab",
   "version": "1.0",
-  "description": "Tells the box which page is in front, so a saved login is typed only into its own site.",
+  "description": "Tells the box which page is in front and what kind of box has focus there, so a saved login is typed only into its own site and a password only into a password box.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtOWylc0UvRLh2wU3OEVDxJFzXgl5wc4dKOzeLDYYgf86/+7+2IUD4bo3VgPcA29xeg+MgEFYadEGvxDgdjwI/k1MDN3glA+ERP6ou/xOLnUPZUg3No0B1ElZ7HfmHl/Ia5BM96D9tRhLQUw+5ggv0v3StzjlJa0Vp+/5Lrwd6A0XbKgGUkcslJKw3uJeqX1NjcO4vwjZjWQJRcAA9UD26mH5NqtjaxJcPnsbd7fJxR3121ll/GBsZItMnE/63LKWz34At/0IrViX5apXGsJnJ81wCg4ahgsQJ9XLiYT5K9BRK81xGz+NNM/NkN1Bv7W1v2aXoKWMtJjaG1DFHdwKfwIDAQAB",
-  "permissions": ["tabs", "nativeMessaging"],
-  "background": { "service_worker": "background.js" }
+  "permissions": [
+    "tabs",
+    "nativeMessaging"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "focus.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
 }
