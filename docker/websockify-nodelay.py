@@ -32,6 +32,33 @@ class _NoDelaySocket(_OrigSocket):
 
 socket.socket = _NoDelaySocket  # type: ignore[misc]
 
+
+def _shared_screen_without_a_token() -> None:
+    """A connection with no token is the box's shared screen (BOX_VNC_SHARED, host:port), as it
+    was before a Bot could have its own screen (box-screen, token s<N>): a server that does not
+    know about own screens keeps reaching the shared one."""
+    import os
+    from urllib.parse import parse_qs, urlparse
+
+    from websockify.websocketproxy import ProxyRequestHandler
+
+    shared = os.environ.get("BOX_VNC_SHARED", "")
+    if ":" not in shared:
+        return
+    host, port = shared.rsplit(":", 1)
+    looked_up = ProxyRequestHandler.get_target
+
+    def get_target(self, target_plugin):
+        args = parse_qs(urlparse(self.path)[4])
+        if not args.get("token") and not getattr(self, "host_token", False):
+            return host, port
+        return looked_up(self, target_plugin)
+
+    ProxyRequestHandler.get_target = get_target
+
+
+_shared_screen_without_a_token()
+
 if __name__ == "__main__":
     sys.argv[0] = "websockify"
     websockify_init()

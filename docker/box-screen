@@ -1,0 +1,141 @@
+#!/bin/bash
+# A Bot's own screen on a computer several Bots share.
+#
+# The box's own screen (BOX_DISPLAY, :1) is the one every Bot shares by default. A Bot told to
+# use its own screen gets a slot here: its own X display, window manager and VNC server, and a
+# Chromium of its own, with its own profile (so what it signs in to stays its own) that the
+# server starts on that display when the Bot opens a page (`box-chromium` with this screen's
+# BOX_DISPLAY and BOX_CHROME_PROFILE). The screen view (websockify on BOX_NOVNC_PORT) reaches it
+# by the token `s<N>`.
+#
+#   box-screen up <bot>     start the Bot's screen (or find it running); prints its slot as JSON
+#   box-screen down <bot>   stop it; its slot and its profile are kept for the next `up`
+#   box-screen list         every Bot's slot, and whether its screen is running
+#
+# Slots are kept in the home volume, so a Bot keeps its display number and profile across
+# restarts and updates; the screens themselves start again on the next `up`.
+set -euo pipefail
+
+MAX_SCREENS="${BOX_MAX_OWN_SCREENS:-4}"
+FIRST_SLOT=2
+HOME_DIR="${HOME:-/home/box}"
+SLOTS_DIR="${HOME_DIR}/.box-screens"
+TOKENS_DIR="${BOX_VNC_TOKENS:-/tmp/box-vnc-tokens}"
+PROFILES_DIR="${BOX_CHROME_PROFILE:-${HOME_DIR}/chrome-profile}/bots"
+GEOM="${BOX_DISPLAY_GEOM:-1280x800x24}"
+PASSFILE="${HOME_DIR}/.vnc/passwd"
+
+die() {
+  printf '{"error":"%s"}\n' "$1"
+  exit 1
+}
+
+bot="${2:-}"
+case "${1:-}" in
+  up | down)
+    # A Bot id names a directory and a profile: letters, digits, `_` and `-` only.
+    [[ "${bot}" =~ ^[A-Za-z0-9_-]{1,80}$ ]] || die "a Bot id is letters, digits, _ and - only"
+    ;;
+  list) ;;
+  *) die "usage: box-screen up|down <bot> | list" ;;
+esac
+
+mkdir -p "${SLOTS_DIR}" "${TOKENS_DIR}" "${PROFILES_DIR}"
+# One box-screen at a time. What it starts must not inherit the lock (`9>&-` below): an X server
+# holding it would make every later box-screen wait for good.
+exec 9>"/tmp/box-screen.lock"
+flock 9
+
+running() {
+  [[ -S "/tmp/.X11-unix/X$1" ]] && pgrep -f "^Xvfb :$1 " >/dev/null
+}
+
+slot_of() {
+  [[ -f "${SLOTS_DIR}/$1" ]] && cat "${SLOTS_DIR}/$1"
+}
+
+allocate() {
+  local taken n
+  taken=" $(cat "${SLOTS_DIR}"/* 2>/dev/null | tr '\n' ' ') "
+  for ((n = FIRST_SLOT; n < FIRST_SLOT + MAX_SCREENS; n++)); do
+    if [[ "${taken}" != *" ${n} "* ]]; then
+      echo "${n}" >"${SLOTS_DIR}/$1"
+      echo "${n}"
+      return
+    fi
+  done
+  return 1
+}
+
+if [[ "$1" == "list" ]]; then
+  printf '{"screens":['
+  sep=""
+  for f in "${SLOTS_DIR}"/*; do
+    [[ -f "${f}" ]] || continue
+    n="$(cat "${f}")"
+    up=false
+    running "${n}" && up=true
+    printf '%s{"bot":"%s","slot":%s,"display":":%s","running":%s}' \
+      "${sep}" "$(basename "${f}")" "${n}" "${n}" "${up}"
+    sep=","
+  done
+  printf ']}\n'
+  exit 0
+fi
+
+profile="${PROFILES_DIR}/${bot}"
+
+if [[ "$1" == "down" ]]; then
+  n="$(slot_of "${bot}")" || { printf '{"bot":"%s","running":false}\n' "${bot}"; exit 0; }
+  pkill -f -- "--user-data-dir=${profile}( |$)" 2>/dev/null || true
+  pkill -f "^x11vnc -display :${n} " 2>/dev/null || true
+  pkill -f "^xfwm4 --display=:${n}( |$)" 2>/dev/null || true
+  pkill -f "^Xvfb :${n} " 2>/dev/null || true
+  rm -f "${TOKENS_DIR}/s${n}"
+  printf '{"bot":"%s","slot":%s,"display":":%s","running":false}\n' "${bot}" "${n}" "${n}"
+  exit 0
+fi
+
+# up
+n="$(slot_of "${bot}")" || n="$(allocate "${bot}")" ||
+  die "this computer already runs ${MAX_SCREENS} Bots' own screens; switch one back to the shared screen first"
+mkdir -p "${profile}"
+
+if ! running "${n}"; then
+  # A screen stopped by a restart leaves its lock and socket in /tmp; nothing else starts an X
+  # server on this number, so both are stale here.
+  rm -f "/tmp/.X${n}-lock" "/tmp/.X11-unix/X${n}"
+  setsid -f Xvfb ":${n}" -screen 0 "${GEOM}" -ac +extension GLX +extension XTEST \
+    +extension DAMAGE +render -noreset >"/tmp/xvfb-${n}.log" 2>&1 9>&-
+  for _ in $(seq 50); do
+    [[ -S "/tmp/.X11-unix/X${n}" ]] && break
+    sleep 0.1
+  done
+  [[ -S "/tmp/.X11-unix/X${n}" ]] || die "the screen's X server did not start"
+fi
+
+if ! pgrep -f "^xfwm4 --display=:${n}( |$)" >/dev/null; then
+  DISPLAY=":${n}" setsid -f xfwm4 --display=":${n}" --compositor=off >"/tmp/xfwm4-${n}.log" 2>&1 9>&-
+fi
+
+if ! pgrep -f "^x11vnc -display :${n} " >/dev/null; then
+  [[ -r "${PASSFILE}" ]] || die "this computer has no screen password"
+  # DISPLAY is this screen's, so box-release-keys (run as a viewer comes and goes) releases the
+  # keys on this screen and not the shared one.
+  DISPLAY=":${n}" setsid -f x11vnc -display ":${n}" -rfbport "$((5900 + n))" -localhost \
+    -rfbauth "${PASSFILE}" -forever -shared -xdamage -nowireframe -speeds lan -wait 10 \
+    -defer 5 -xkb -clear_mods -clear_keys \
+    -afteraccept /usr/local/bin/box-release-keys -gone /usr/local/bin/box-release-keys \
+    >"/tmp/x11vnc-${n}.log" 2>&1 9>&-
+fi
+
+printf 's%s: 127.0.0.1:%s\n' "${n}" "$((5900 + n))" >"${TOKENS_DIR}/s${n}"
+
+# A profile kept from an older extension runs its old background script (see
+# box-refresh-extension); this Bot's Chromium is not running yet when the screen first comes up.
+if ! pgrep -f -- "--user-data-dir=${profile}( |$)" >/dev/null; then
+  BOX_CHROME_PROFILE="${profile}" /usr/local/bin/box-refresh-extension >/dev/null
+fi
+
+printf '{"bot":"%s","slot":%s,"display":":%s","profile":"%s","running":true}\n' \
+  "${bot}" "${n}" "${n}" "${profile}"

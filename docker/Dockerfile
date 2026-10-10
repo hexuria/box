@@ -72,6 +72,10 @@ COPY docker/chromium-policies.json /etc/opt/chrome/policies/managed/grok-box.jso
 # click opens a window in the running instance instead of a second browser.
 COPY docker/box-chromium /usr/local/bin/box-chromium
 COPY docker/box-chromium-pipe /usr/local/bin/box-chromium-pipe
+# A Bot's own screen on a computer several Bots share, and the once-per-change clearing of a
+# profile's old extension worker that the shared screen and every own screen run.
+COPY docker/box-screen /usr/local/bin/box-screen
+COPY docker/box-refresh-extension /usr/local/bin/box-refresh-extension
 # Panel with Terminal / Chromium / Files launchers, so xfce4-panel never shows
 # its first-run wizard and the dock is there from the first frame.
 COPY --chown=box:box docker/xfce/xfce4-panel.xml /home/box/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml
@@ -87,6 +91,7 @@ RUN chmod 755 /usr/local/bin/entrypoint.sh /usr/local/bin/websockify-nodelay /us
         /usr/local/bin/box-egress-tunnel \
         /usr/local/bin/box-reset-desktop /usr/local/bin/box-release-keys /usr/local/bin/box-chromium \
         /usr/local/bin/box-chromium-pipe /usr/local/bin/box-active-tab \
+        /usr/local/bin/box-screen /usr/local/bin/box-refresh-extension \
     && chown -R box:box /home/box/.config
 
 ENV WORKSPACE_ROOT=/workspace \

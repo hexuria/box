@@ -42,6 +42,9 @@ pub struct GrokBox {
     host_url: String,
     token: String,
     http: HttpClient,
+    /// The screen the computer-use and page-in-front calls go to: `None` is the box's own;
+    /// `:N` is a Bot's own screen (`box-screen`). See [`GrokBox::on`].
+    display: Option<String>,
 }
 
 impl GrokBox {
@@ -65,7 +68,32 @@ impl GrokBox {
             host_url,
             token,
             http,
+            display: None,
         })
+    }
+
+    /// This client on another of the box's screens (`:N`, a Bot's own, started by
+    /// `box-screen up`): its clicks, keys, screenshots and page-in-front reports are that
+    /// screen's. Commands and files are the box's whatever the screen.
+    #[must_use]
+    pub fn on(&self, display: &str) -> Self {
+        Self {
+            display: Some(display.to_string()),
+            ..self.clone()
+        }
+    }
+
+    /// `/v1/cua/<path>` on the exec URL, on this client's screen.
+    fn cua(&self, path: &str) -> String {
+        format!("{}/v1/cua/{path}{}", self.exec_url, self.screen_query('?'))
+    }
+
+    /// `<sep>display=:N` (escaped) for a screen other than the box's own; empty otherwise.
+    fn screen_query(&self, sep: char) -> String {
+        match &self.display {
+            Some(display) => format!("{sep}display={}", display.replace(':', "%3A")),
+            None => String::new(),
+        }
     }
 
     pub fn exec_url(&self) -> &str {
@@ -219,7 +247,11 @@ impl GrokBox {
     pub async fn active_tab(&self) -> Result<Value, Error> {
         self.send_json(
             "GET",
-            &format!("{}/v1/chrome/active-tab", self.host_url),
+            &format!(
+                "{}/v1/chrome/active-tab{}",
+                self.host_url,
+                self.screen_query('?')
+            ),
             None,
             true,
         )
@@ -278,20 +310,19 @@ impl GrokBox {
     }
 
     pub async fn screenshot(&self) -> Result<ScreenshotResponse, Error> {
-        self.send_json(
-            "POST",
-            &format!("{}/v1/cua/screenshot", self.exec_url),
-            None,
-            true,
-        )
-        .await
+        self.send_json("POST", &self.cua("screenshot"), None, true)
+            .await
     }
 
     pub async fn screenshot_png(&self) -> Result<Vec<u8>, Error> {
         let (status, bytes, _) = self
             .send(
                 "POST",
-                &format!("{}/v1/cua/screenshot?format=png", self.exec_url),
+                &format!(
+                    "{}/v1/cua/screenshot?format=png{}",
+                    self.exec_url,
+                    self.screen_query('&')
+                ),
                 None,
                 true,
                 "image/png",
@@ -307,7 +338,7 @@ impl GrokBox {
     pub async fn click(&self, x: i32, y: i32, button: Option<u8>) -> Result<CuaOk, Error> {
         self.send_json(
             "POST",
-            &format!("{}/v1/cua/click", self.exec_url),
+            &self.cua("click"),
             Some(json!({ "x": x, "y": y, "button": button })),
             true,
         )
@@ -317,7 +348,7 @@ impl GrokBox {
     pub async fn double_click(&self, x: i32, y: i32, button: Option<u8>) -> Result<CuaOk, Error> {
         self.send_json(
             "POST",
-            &format!("{}/v1/cua/double-click", self.exec_url),
+            &self.cua("double-click"),
             Some(json!({ "x": x, "y": y, "button": button })),
             true,
         )
@@ -327,7 +358,7 @@ impl GrokBox {
     pub async fn move_pointer(&self, x: i32, y: i32) -> Result<CuaOk, Error> {
         self.send_json(
             "POST",
-            &format!("{}/v1/cua/move", self.exec_url),
+            &self.cua("move"),
             Some(json!({ "x": x, "y": y })),
             true,
         )
@@ -344,7 +375,7 @@ impl GrokBox {
     ) -> Result<CuaOk, Error> {
         self.send_json(
             "POST",
-            &format!("{}/v1/cua/drag", self.exec_url),
+            &self.cua("drag"),
             Some(json!({ "x1": x1, "y1": y1, "x2": x2, "y2": y2, "button": button })),
             true,
         )
@@ -354,7 +385,7 @@ impl GrokBox {
     pub async fn press(&self, x: i32, y: i32, button: Option<u8>) -> Result<CuaOk, Error> {
         self.send_json(
             "POST",
-            &format!("{}/v1/cua/press", self.exec_url),
+            &self.cua("press"),
             Some(json!({ "x": x, "y": y, "button": button })),
             true,
         )
@@ -375,7 +406,7 @@ impl GrokBox {
         });
         self.send_json(
             "POST",
-            &format!("{}/v1/cua/release", self.exec_url),
+            &self.cua("release"),
             Some(json!({ "x": x, "y": y, "button": button, "path": path })),
             true,
         )
@@ -385,7 +416,7 @@ impl GrokBox {
     pub async fn type_text(&self, text: &str) -> Result<CuaOk, Error> {
         self.send_json(
             "POST",
-            &format!("{}/v1/cua/type", self.exec_url),
+            &self.cua("type"),
             Some(json!({ "text": text })),
             true,
         )
@@ -399,7 +430,7 @@ impl GrokBox {
     pub async fn key_action(&self, key: &str, action: Option<&str>) -> Result<CuaOk, Error> {
         self.send_json(
             "POST",
-            &format!("{}/v1/cua/key", self.exec_url),
+            &self.cua("key"),
             Some(json!({ "key": key, "action": action })),
             true,
         )
@@ -409,7 +440,7 @@ impl GrokBox {
     pub async fn scroll(&self, x: i32, y: i32, dx: i32, dy: i32) -> Result<CuaOk, Error> {
         self.send_json(
             "POST",
-            &format!("{}/v1/cua/scroll", self.exec_url),
+            &self.cua("scroll"),
             Some(json!({ "x": x, "y": y, "dx": dx, "dy": dy })),
             true,
         )
@@ -419,13 +450,8 @@ impl GrokBox {
     /// Run many CUA steps in one request. The guest validates the whole plan
     /// before moving the pointer.
     pub async fn recipe(&self, request: &Value) -> Result<Value, Error> {
-        self.send_json(
-            "POST",
-            &format!("{}/v1/cua/recipe", self.exec_url),
-            Some(request.clone()),
-            true,
-        )
-        .await
+        self.send_json("POST", &self.cua("recipe"), Some(request.clone()), true)
+            .await
     }
 
     async fn send_json<T: for<'de> Deserialize<'de>>(
@@ -673,5 +699,20 @@ mod tests {
             GrokBox::connect("http://127.0.0.1:1337/", "http://127.0.0.1:1340/", "tok").unwrap();
         assert_eq!(box_client.exec_url(), "http://127.0.0.1:1337");
         assert_eq!(box_client.host_url(), "http://127.0.0.1:1340");
+    }
+
+    /// The box's own screen keeps the URLs it always had; a Bot's own screen names its display.
+    #[test]
+    fn a_client_on_another_screen_names_it_on_every_screen_call() {
+        let shared =
+            GrokBox::connect("http://127.0.0.1:1337", "http://127.0.0.1:1340", "tok").unwrap();
+        assert_eq!(shared.cua("click"), "http://127.0.0.1:1337/v1/cua/click");
+        let own = shared.on(":3");
+        assert_eq!(
+            own.cua("click"),
+            "http://127.0.0.1:1337/v1/cua/click?display=%3A3"
+        );
+        assert_eq!(own.screen_query('&'), "&display=%3A3");
+        assert_eq!(shared.screen_query('&'), "");
     }
 }

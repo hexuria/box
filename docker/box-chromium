@@ -29,8 +29,17 @@ case "$(echo "${tunnel:-0}" | tr '[:upper:]' '[:lower:]')" in
     proxy_webrtc="--force-webrtc-ip-handling-policy=disable_non_proxied_udp"
     ;;
 esac
+# The screen to open on: a Bot's own screen (box-screen) is passed as BOX_DISPLAY with its own
+# BOX_CHROME_PROFILE; otherwise the box's own, as before. The window fills that screen.
+export DISPLAY="${BOX_DISPLAY:-${DISPLAY:-:1}}"
+geom="${BOX_DISPLAY_GEOM:-1280x800x24}"
+win_w="${geom%%x*}"
+rest="${geom#*x}"
+win_h="${rest%%x*}"
 exec chromium \
   --user-data-dir="${BOX_CHROME_PROFILE:-/home/box/chrome-profile}" \
+  --window-size="${win_w},${win_h}" \
+  --window-position=0,0 \
   --no-first-run \
   --no-default-browser-check \
   --disable-dev-shm-usage \

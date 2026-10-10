@@ -12,7 +12,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::extract::{Request, State};
+use axum::extract::{Query, Request, State};
 use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::routing::{get, post};
@@ -261,11 +261,18 @@ async fn egress(State(state): State<AppState>) -> Json<EgressStatus> {
     Json(probe_egress(&state.egress))
 }
 
+/// `?display=:N`: one of the box's other screens (a Bot's own, `box-screen`).
+#[derive(Debug, Default, serde::Deserialize)]
+struct OnScreen {
+    display: Option<String>,
+}
+
 /// The page in front of Chromium, as the box's extension last reported it (`url: null` when
-/// nothing has). Read before a saved login is typed; see [`active_tab`].
-async fn active_tab_now() -> Json<active_tab::ActiveTab> {
-    Json(active_tab::read(std::path::Path::new(
-        active_tab::ACTIVE_TAB_FILE,
+/// nothing has), on the box's own screen or the one named. Read before a saved login is typed;
+/// see [`active_tab`].
+async fn active_tab_now(Query(on): Query<OnScreen>) -> Json<active_tab::ActiveTab> {
+    Json(active_tab::read(&active_tab::file_for(
+        on.display.as_deref(),
     )))
 }
 

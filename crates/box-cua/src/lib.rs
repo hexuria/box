@@ -167,6 +167,27 @@ impl CuaConfig {
         }
     }
 
+    /// This config on another of the box's screens: a Bot's own screen on a computer several
+    /// Bots share is its own X display (`box-screen`), with the same size as the shared one.
+    /// `None` is the box's own display. Only a display name (`:N`) is taken.
+    pub fn on(&self, display: Option<&str>) -> Result<Self, CuaError> {
+        let Some(display) = display.map(str::trim).filter(|d| !d.is_empty()) else {
+            return Ok(self.clone());
+        };
+        let number = display.strip_prefix(':').unwrap_or("");
+        let named =
+            !number.is_empty() && number.len() <= 3 && number.bytes().all(|b| b.is_ascii_digit());
+        if !named {
+            return Err(CuaError::Invalid(format!(
+                "display must be :N, not {display:?}"
+            )));
+        }
+        Ok(Self {
+            display: display.to_string(),
+            ..self.clone()
+        })
+    }
+
     /// True when CUA is enabled and the X display socket is present.
     pub fn capability_ready(&self) -> bool {
         self.enabled && display_up(&self.display)
@@ -682,6 +703,27 @@ pub fn drag_waypoints(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_request_may_name_another_screen_of_the_box() {
+        let shared = CuaConfig {
+            display: ":1".into(),
+            width: 1280,
+            height: 800,
+            enabled: true,
+        };
+        assert_eq!(shared.on(None).unwrap().display, ":1");
+        assert_eq!(shared.on(Some("")).unwrap().display, ":1");
+        let own = shared.on(Some(":3")).unwrap();
+        assert_eq!(
+            (own.display.as_str(), own.width, own.height),
+            (":3", 1280, 800)
+        );
+        for bad in ["3", ":", ":1.0", ":abc", ":1234", "; rm -rf /"] {
+            assert!(shared.on(Some(bad)).is_err(), "{bad:?}");
+        }
+    }
+
     use super::*;
 
     #[test]

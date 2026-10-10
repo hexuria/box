@@ -17,8 +17,31 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-/// Where `box-active-tab` keeps the latest report. Removed when Chromium closes the port.
+/// Where `box-active-tab` keeps the latest report for the box's own screen. Removed when
+/// Chromium closes the port.
 pub const ACTIVE_TAB_FILE: &str = "/tmp/box-active-tab.json";
+
+/// Where the report for a screen is kept. Each of the box's screens has its own Chromium
+/// (`box-screen`: a Bot's own screen on a computer several Bots share), and each Chromium starts
+/// its own `box-active-tab`, which inherits that Chromium's `DISPLAY`. The shared screen
+/// (`BOX_SHARED_DISPLAY`, `:1` by default) keeps [`ACTIVE_TAB_FILE`]; any other `:N` is
+/// `/tmp/box-active-tab.N.json`. Anything that is not a display name is the shared screen.
+///
+/// Not `BOX_DISPLAY`: a Bot's own Chromium is started with `BOX_DISPLAY` set to its own screen,
+/// and its host would take that screen for the shared one.
+pub fn file_for(display: Option<&str>) -> std::path::PathBuf {
+    let own = std::env::var("BOX_SHARED_DISPLAY").unwrap_or_else(|_| ":1".to_string());
+    let number = |d: &str| {
+        let n = d.trim().strip_prefix(':')?.split('.').next()?.to_string();
+        (!n.is_empty() && n.len() <= 3 && n.bytes().all(|b| b.is_ascii_digit())).then_some(n)
+    };
+    match display.and_then(number) {
+        Some(n) if Some(n.clone()) != number(&own) => {
+            std::path::PathBuf::from(format!("/tmp/box-active-tab.{n}.json"))
+        }
+        _ => std::path::PathBuf::from(ACTIVE_TAB_FILE),
+    }
+}
 
 /// Native messaging caps a message to the host at 64 MiB; a URL is far smaller, and anything
 /// past this is not the extension speaking.
@@ -183,6 +206,20 @@ mod tests {
                 (None, Some(3)),
             ]
         );
+    }
+
+    /// Each screen's Chromium reports to its own file; the box's own screen keeps the old one.
+    #[test]
+    fn each_screen_has_its_own_report() {
+        assert_eq!(file_for(None), Path::new(ACTIVE_TAB_FILE));
+        assert_eq!(file_for(Some(":1")), Path::new(ACTIVE_TAB_FILE));
+        assert_eq!(file_for(Some(":1.0")), Path::new(ACTIVE_TAB_FILE));
+        assert_eq!(
+            file_for(Some(":3")),
+            Path::new("/tmp/box-active-tab.3.json")
+        );
+        assert_eq!(file_for(Some("../../etc")), Path::new(ACTIVE_TAB_FILE));
+        assert_eq!(file_for(Some(":3/../x")), Path::new(ACTIVE_TAB_FILE));
     }
 
     #[test]
