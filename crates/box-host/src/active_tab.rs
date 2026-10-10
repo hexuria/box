@@ -33,6 +33,15 @@ pub struct ActiveTab {
     /// When the extension last reported, in ms since the epoch.
     #[serde(rename = "atMs", skip_serializing_if = "Option::is_none")]
     pub at_ms: Option<u64>,
+    /// What kind of box has focus on that page, as its page said (`docker/active-tab/focus.js`):
+    /// `password`, `text`, `other` or `none`; `None` while the page has not said. The server
+    /// types a password only into a `password` box.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus: Option<String>,
+    /// How many reports this browser has made: a reader that clicked a field waits for it to
+    /// move before it trusts `focus`, so an older report is not taken for the click's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
 }
 
 /// One native-messaging message: a 4-byte length in native byte order, then that much JSON.
@@ -58,16 +67,20 @@ pub fn read_message(input: &mut impl Read) -> io::Result<Option<serde_json::Valu
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
-/// Keep `url` as the page in front: a new file renamed over the old, so a reader never sees
-/// half of one.
-pub fn record(path: &Path, url: &str) -> io::Result<()> {
+/// Keep `url` as the page in front, with the kind of box focused on it and the report's number:
+/// a new file renamed over the old, so a reader never sees half of one.
+pub fn record(path: &Path, url: &str, focus: Option<&str>, seq: u64) -> io::Result<()> {
     let at_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
+    // Only the words the extension uses: anything else is not the extension speaking.
+    let focus = focus.filter(|f| matches!(*f, "password" | "text" | "other" | "none"));
     let tab = ActiveTab {
         url: Some(url.to_string()),
         at_ms: Some(at_ms),
+        focus: focus.map(str::to_string),
+        seq: Some(seq),
     };
     let tmp = path.with_extension("json.tmp");
     let mut file = std::fs::File::create(&tmp)?;
@@ -84,6 +97,8 @@ pub fn read(path: &Path) -> ActiveTab {
         .unwrap_or(ActiveTab {
             url: None,
             at_ms: None,
+            focus: None,
+            seq: None,
         })
 }
 
@@ -91,9 +106,12 @@ pub fn read(path: &Path) -> ActiveTab {
 /// so a browser that is gone is never taken for one showing its last page.
 pub fn serve(input: &mut impl Read, path: &Path) -> io::Result<()> {
     let result = (|| {
+        let mut seq = 0;
         while let Some(message) = read_message(input)? {
             if let Some(url) = message.get("url").and_then(serde_json::Value::as_str) {
-                record(path, url)?;
+                seq += 1;
+                let focus = message.get("focus").and_then(serde_json::Value::as_str);
+                record(path, url, focus, seq)?;
             }
         }
         Ok(())
@@ -123,7 +141,7 @@ mod tests {
         // Read as it arrives: after both reports, the second is in front.
         let mut reader = &input[..];
         while let Some(message) = read_message(&mut reader).unwrap() {
-            record(&path, message["url"].as_str().unwrap()).unwrap();
+            record(&path, message["url"].as_str().unwrap(), None, 1).unwrap();
         }
         assert_eq!(
             read(&path).url.as_deref(),
@@ -133,6 +151,38 @@ mod tests {
         // The whole life: once Chromium closes the port nothing is known.
         serve(&mut &input[..], &path).unwrap();
         assert_eq!(read(&path).url, None);
+    }
+
+    /// The focused box's kind comes through with each report, numbered, and only in the
+    /// extension's own words.
+    #[test]
+    fn each_report_says_what_kind_of_box_has_focus() {
+        let dir = std::env::temp_dir().join(format!("active-tab-focus-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tab.json");
+        let fb = "https://www.facebook.com/login";
+        let mut input = framed(&format!(r#"{{"url":"{fb}","focus":"text"}}"#));
+        input.extend(framed(&format!(r#"{{"url":"{fb}","focus":"password"}}"#)));
+        input.extend(framed(&format!(r#"{{"url":"{fb}","focus":"<script>"}}"#)));
+
+        let mut reader = &input[..];
+        let mut seq = 0;
+        let mut seen = Vec::new();
+        while let Some(message) = read_message(&mut reader).unwrap() {
+            seq += 1;
+            let focus = message["focus"].as_str();
+            record(&path, message["url"].as_str().unwrap(), focus, seq).unwrap();
+            let now = read(&path);
+            seen.push((now.focus, now.seq));
+        }
+        assert_eq!(
+            seen,
+            [
+                (Some("text".to_string()), Some(1)),
+                (Some("password".to_string()), Some(2)),
+                (None, Some(3)),
+            ]
+        );
     }
 
     #[test]
