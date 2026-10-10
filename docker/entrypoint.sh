@@ -39,6 +39,9 @@ unset BOX_TOKEN BOX_HOST_TOKEN BOX_VNC_PASSWORD || true
 export WORKSPACE_ROOT="${WORKSPACE_ROOT:-/workspace}"
 export BOX_DESKTOP="${BOX_DESKTOP:-1}"
 export BOX_DISPLAY="${BOX_DISPLAY:-:1}"
+# The shared screen, under a name a Bot's own screen never sets (it passes its own BOX_DISPLAY):
+# box-active-tab and box-host tell the shared screen's report from a Bot's by it.
+export BOX_SHARED_DISPLAY="${BOX_DISPLAY}"
 export BOX_DISPLAY_GEOM="${BOX_DISPLAY_GEOM:-1280x800x24}"
 export BOX_VNC_BIND="${BOX_VNC_BIND:-127.0.0.1:5900}"
 export BOX_NOVNC_PORT="${BOX_NOVNC_PORT:-6080}"
@@ -203,29 +206,16 @@ start_desktop() {
   # 0.0.0.0 *inside* the container so Docker port-map to the veth IP works.
   # Host publish is 127.0.0.1:6080. 6080 is not Bearer-authenticated.
   echo "starting noVNC/websockify on 0.0.0.0:${BOX_NOVNC_PORT} (host publish should be loopback)"
-  websockify-nodelay --web="${BOX_NOVNC_WEB}" "0.0.0.0:${BOX_NOVNC_PORT}" "${BOX_VNC_BIND}" \
+  # One viewer port for every screen of the box: a Bot's own screen (box-screen) is reached by
+  # the token s<N> in the websocket's query, and a connection with no token is the shared screen,
+  # as it always was.
+  export BOX_VNC_TOKENS="${BOX_VNC_TOKENS:-/tmp/box-vnc-tokens}"
+  mkdir -p "${BOX_VNC_TOKENS}"
+  printf 's%s: %s\n' "${dnum}" "${BOX_VNC_BIND}" >"${BOX_VNC_TOKENS}/s${dnum}"
+  BOX_VNC_SHARED="${BOX_VNC_BIND}" websockify-nodelay --web="${BOX_NOVNC_WEB}" \
+    --token-plugin TokenFile --token-source "${BOX_VNC_TOKENS}" "0.0.0.0:${BOX_NOVNC_PORT}" \
     >/tmp/websockify.log 2>&1 &
   record $!
-}
-
-# The box's extension runs as a service worker, and Chromium goes on running the worker script
-# a profile registered first: a profile kept from an image with an older extension ran the old
-# background script, and the page's focus was never reported (10 Oct 2026). A new extension
-# version did not change that. So when the extension's files differ from the ones this profile
-# last started with, its service workers are cleared once, before Chromium starts, and every
-# worker (the extension's, and any a site had) registers anew.
-refresh_extension_worker() {
-  local stamp="${BOX_CHROME_PROFILE}/.box-active-tab.sha256"
-  local now
-  now="$(cat /opt/box/active-tab/* | sha256sum | cut -d' ' -f1)"
-  if [[ -f "${stamp}" && "$(cat "${stamp}")" == "${now}" ]]; then
-    return
-  fi
-  if [[ -d "${BOX_CHROME_PROFILE}/Default/Service Worker" ]]; then
-    echo "the box extension changed; clearing the profile's service workers once"
-    rm -rf -- "${BOX_CHROME_PROFILE}/Default/Service Worker"
-  fi
-  printf '%s\n' "${now}" >"${stamp}"
 }
 
 start_chrome() {
@@ -247,7 +237,8 @@ start_chrome() {
     export BOX_CHROME_PROFILE="/tmp/box-chrome-profile"
     mkdir -p "${BOX_CHROME_PROFILE}"
   fi
-  refresh_extension_worker
+  # See box-refresh-extension: a profile kept from an older extension runs its old worker.
+  /usr/local/bin/box-refresh-extension
   read -r w h < <(geom_wh)
   export DISPLAY="${BOX_DISPLAY}"
 
