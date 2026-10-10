@@ -208,6 +208,26 @@ start_desktop() {
   record $!
 }
 
+# The box's extension runs as a service worker, and Chromium goes on running the worker script
+# a profile registered first: a profile kept from an image with an older extension ran the old
+# background script, and the page's focus was never reported (10 Oct 2026). A new extension
+# version did not change that. So when the extension's files differ from the ones this profile
+# last started with, its service workers are cleared once, before Chromium starts, and every
+# worker (the extension's, and any a site had) registers anew.
+refresh_extension_worker() {
+  local stamp="${BOX_CHROME_PROFILE}/.box-active-tab.sha256"
+  local now
+  now="$(cat /opt/box/active-tab/* | sha256sum | cut -d' ' -f1)"
+  if [[ -f "${stamp}" && "$(cat "${stamp}")" == "${now}" ]]; then
+    return
+  fi
+  if [[ -d "${BOX_CHROME_PROFILE}/Default/Service Worker" ]]; then
+    echo "the box extension changed; clearing the profile's service workers once"
+    rm -rf -- "${BOX_CHROME_PROFILE}/Default/Service Worker"
+  fi
+  printf '%s\n' "${now}" >"${stamp}"
+}
+
 start_chrome() {
   local bin="" candidate w h
   for candidate in chromium chromium-browser google-chrome google-chrome-stable; do
@@ -227,6 +247,7 @@ start_chrome() {
     export BOX_CHROME_PROFILE="/tmp/box-chrome-profile"
     mkdir -p "${BOX_CHROME_PROFILE}"
   fi
+  refresh_extension_worker
   read -r w h < <(geom_wh)
   export DISPLAY="${BOX_DISPLAY}"
 
