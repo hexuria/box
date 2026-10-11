@@ -1,9 +1,10 @@
 #!/bin/bash
 # A Bot's own screen on a computer several Bots share.
 #
-# The box's own screen (BOX_DISPLAY, :1) is the one every Bot shares by default. A Bot told to
-# use its own screen gets a slot here: its own X display, window manager and VNC server, and a
-# Chromium of its own, with its own profile (so what it signs in to stays its own) that the
+# The box's own screen (BOX_DISPLAY, :1) is its main one. Every Bot on a computer several Bots
+# share gets a slot here: its own X display with the same desktop as the main screen (an xfce
+# session: wallpaper, and the dock whose Chromium is this Bot's), a VNC server, and a Chromium of
+# its own, with its own profile (so what it signs in to stays its own) that the
 # server starts on that display when the Bot opens a page (`box-chromium` with this screen's
 # BOX_DISPLAY and BOX_CHROME_PROFILE). The screen view (websockify on BOX_NOVNC_PORT) reaches it
 # by the token `s<N>`.
@@ -50,6 +51,16 @@ running() {
   [[ -S "/tmp/.X11-unix/X$1" ]] && pgrep -f "^Xvfb :$1 " >/dev/null
 }
 
+# The xfce session on display :$1. Every screen's session is the same command, so it is told apart
+# by the DISPLAY it was started with.
+sessions_on() {
+  local p
+  for p in $(pgrep -x xfce4-session); do
+    tr '\0' '\n' <"/proc/${p}/environ" 2>/dev/null | grep -qx "DISPLAY=:$1" && echo "${p}"
+  done
+  return 0
+}
+
 slot_of() {
   [[ -f "${SLOTS_DIR}/$1" ]] && cat "${SLOTS_DIR}/$1"
 }
@@ -89,7 +100,7 @@ if [[ "$1" == "down" ]]; then
   n="$(slot_of "${bot}")" || { printf '{"bot":"%s","running":false}\n' "${bot}"; exit 0; }
   pkill -f -- "--user-data-dir=${profile}( |$)" 2>/dev/null || true
   pkill -f "^x11vnc -display :${n} " 2>/dev/null || true
-  pkill -f "^xfwm4 --display=:${n}( |$)" 2>/dev/null || true
+  for p in $(sessions_on "${n}"); do kill "${p}" 2>/dev/null || true; done
   pkill -f "^Xvfb :${n} " 2>/dev/null || true
   rm -f "${TOKENS_DIR}/s${n}"
   printf '{"bot":"%s","slot":%s,"display":":%s","running":false}\n' "${bot}" "${n}" "${n}"
@@ -114,8 +125,18 @@ if ! running "${n}"; then
   [[ -S "/tmp/.X11-unix/X${n}" ]] || die "the screen's X server did not start"
 fi
 
-if ! pgrep -f "^xfwm4 --display=:${n}( |$)" >/dev/null; then
-  DISPLAY=":${n}" setsid -f xfwm4 --display=":${n}" --compositor=off >"/tmp/xfwm4-${n}.log" 2>&1 9>&-
+# The main screen's desktop (entrypoint.sh): xfce4-session brings up xfwm4, xfdesktop (the
+# wallpaper) and the panel (the dock), over a session bus of their own. Without it the screen is
+# plain black until the Bot opens a page, and black again once it closes its browser. The dock's
+# Chromium launcher is box-chromium, which opens on BOX_DISPLAY with BOX_CHROME_PROFILE: this
+# Bot's browser on this screen, from the session's environment.
+if [[ -z "$(sessions_on "${n}")" ]]; then
+  runtime="/tmp/runtime-box-${n}"
+  mkdir -p "${runtime}"
+  chmod 700 "${runtime}"
+  DISPLAY=":${n}" BOX_DISPLAY=":${n}" BOX_CHROME_PROFILE="${profile}" XDG_RUNTIME_DIR="${runtime}" \
+    XDG_CONFIG_HOME="${HOME_DIR}/.config" \
+    setsid -f dbus-launch --exit-with-session xfce4-session >"/tmp/xfce4-session-${n}.log" 2>&1 9>&-
 fi
 
 if ! pgrep -f "^x11vnc -display :${n} " >/dev/null; then
